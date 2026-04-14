@@ -1,0 +1,341 @@
+$KILLSWITCH - Product Hunt Launch Materials
+===========================================
+
+TAGLINE (60 chars max):
+----------------------
+"Emergency kill switch and guardrails for AI agents"
+
+
+THUMBNAIL IMAGE:
+---------------
+- Red circular "STOP" button with AI circuit pattern
+- Text: "$KILLSWITCH" in bold
+- Subtext: "Because every AI needs an off switch"
+- Size: 240x240px minimum
+
+
+FIRST COMMENT (Maker Introduction):
+-----------------------------------
+Hey Product Hunt! 👋
+
+I'm David Cooper (CCIE #14019), and I built $KILLSWITCH after realizing AI agents lack something every human worker has: someone who can tell them to STOP.
+
+**Why this matters:**
+
+Last year, an autonomous agent deleted my staging database because it misunderstood "clean up old data." That 2AM incident inspired $KILLSWITCH.
+
+**What it does:**
+
+$KILLSWITCH sits between your AI agent and the outside world, blocking dangerous actions in real-time:
+
+- 🔴 **Kill Switch** - Stop any agent instantly (<100ms)
+- 🚫 **Action Blocking** - Define forbidden actions (delete, exec, etc.)
+- 🛡️ **Target Protection** - Block access to sensitive files/APIs
+- 💰 **Spending Limits** - Prevent runaway costs
+- 📊 **Risk Scoring** - Automatic risk assessment
+- 📝 **Audit Trail** - Complete action history
+
+**Quick start:**
+```python
+pip install runtime-fence
+
+from runtime_fence import RuntimeFence, FenceConfig
+
+fence = RuntimeFence(FenceConfig(
+    agent_id="my-agent",
+    blocked_actions=["delete", "exec"],
+    spending_limit=100.0
+))
+
+# All agent actions now go through the fence
+```
+
+**Who needs this?**
+
+- Anyone using AutoGPT, LangChain, or custom agents
+- Developers building AI-powered automation
+- Teams deploying autonomous systems
+- Companies with compliance requirements
+
+**Open source & privacy-first:**
+- MIT licensed
+- Works offline (no API required)
+- Self-hosted option
+- Optional cloud dashboard
+
+Try it free: [link]
+
+Would love your feedback! What safety features would you want for your AI agents?
+
+
+DESCRIPTION (longer):
+---------------------
+# Emergency Stop for Your AI Agents
+
+$KILLSWITCH is an open-source safety layer for AI agents. Think of it as a circuit breaker that prevents AI from causing damage.
+
+## The Problem
+
+AI agents can:
+- Delete production databases
+- Spend thousands on API calls
+- Leak sensitive credentials
+- Execute dangerous commands
+- Transfer funds without approval
+
+And they do all this in milliseconds.
+
+## The Solution
+
+$KILLSWITCH validates every action before it happens:
+
+1. **Real-time Validation** - Every agent action passes through the fence
+2. **Risk Scoring** - Automatic assessment of potential damage
+3. **Instant Kill** - Emergency stop in under 100ms
+4. **Audit Trail** - Complete log of what was attempted vs allowed
+5. **Alerts** - Email/SMS when suspicious activity occurs
+
+## How It Works
+
+Wrap your AI agent with Runtime Fence:
+
+```python
+from runtime_fence import RuntimeFence, FenceConfig
+
+fence = RuntimeFence(FenceConfig(
+    agent_id="my-coding-assistant",
+    blocked_actions=["delete", "exec", "rm"],
+    blocked_targets=["production", ".env", "api_keys"],
+    spending_limit=50.0
+))
+
+# Validate before allowing
+result = fence.validate("delete", "user_data.sql")
+if result.allowed:
+    # Proceed
+else:
+    print(f"Blocked: {result.reasons}")
+```
+
+## Features
+
+**Core Protection:**
+- Kill switch (instant stop)
+- Action allowlist/blocklist
+- Target protection (files, APIs, services)
+- Spending limits
+- Risk thresholds
+
+**Monitoring:**
+- Real-time dashboard
+- Action history
+- Risk scoring
+- Anomaly detection
+
+**Alerts:**
+- Email notifications
+- SMS alerts (Twilio)
+- Slack/Discord webhooks
+- Custom integrations
+
+**Compliance:**
+- Complete audit logs
+- Cryptographic verification
+- Export to SIEM
+- SOC2 ready
+
+## Integrations
+
+Works with:
+- LangChain
+- AutoGPT
+- Custom OpenAI/Anthropic agents
+- Any Python application
+- REST API for any language
+
+## Pricing
+
+- **Open Source**: Free forever (MIT license)
+- **Cloud Dashboard**: $5-50/month (optional)
+- **Enterprise**: Custom pricing for teams
+
+## Tech Stack
+
+- Python 3.10+
+- TypeScript/React dashboard
+- Self-hosted or cloud
+- Works offline
+
+
+GALLERY IMAGES (6-8 images):
+---------------------------
+
+1. **Hero Screenshot**
+   - Dashboard showing blocked actions in real-time
+   - Big red KILL button prominent
+
+2. **Code Example**
+   - Clean terminal showing installation and basic usage
+   - Syntax highlighted
+
+3. **Risk Score Chart**
+   - Graph showing risk scores over time
+   - Clear visual of blocked vs allowed actions
+
+4. **Multi-Agent View**
+   - Dashboard managing 3-4 different agents
+   - Status indicators
+
+5. **Audit Log**
+   - Table showing action history
+   - Timestamps, actions, results
+
+6. **Mobile App** (if ready)
+   - Kill switch on mobile device
+
+7. **Architecture Diagram**
+   - Simple flow: Agent → Fence → World
+   - Visual representation of protection
+
+8. **Alert Example**
+   - Email/SMS notification screenshot
+   - Clear incident details
+
+
+SOCIAL MEDIA POSTS:
+------------------
+
+Twitter/X Launch Thread:
+
+🧵 1/7
+Just launched $KILLSWITCH on @ProductHunt! 
+
+It's an emergency kill switch for AI agents. Because your AI should have an off button.
+
+[link to PH]
+
+2/7
+The problem: AI agents can delete databases, spend $$$, or leak secrets in milliseconds.
+
+The solution: Validate every action before it happens.
+
+[demo GIF]
+
+3/7
+Quick demo - watch this agent try (and fail) to:
+❌ Delete production files
+❌ Spend $5,000 on APIs
+❌ Read .env secrets
+
+All blocked automatically.
+
+[video clip]
+
+4/7
+Installation is 2 lines:
+
+pip install runtime-fence
+
+Then wrap your agent. That's it.
+
+Works with LangChain, AutoGPT, or any Python code.
+
+[code screenshot]
+
+5/7
+Features:
+🔴 <100ms kill switch
+🚫 Action blocking
+💰 Spending limits
+📊 Risk scoring
+📝 Full audit logs
+📧 Real-time alerts
+
+Open source (MIT) + optional cloud dashboard
+
+6/7
+Built this after an AI agent deleted my staging DB at 2AM.
+
+If you're building with AI agents, you need safety controls.
+
+This is that.
+
+7/7
+Try it free: [link]
+Support on PH: [link]
+Star on GitHub: [link]
+
+RT to help spread AI safety! 🚀
+
+
+HUNTER PITCH (if you know someone):
+----------------------------------
+Hey [Name],
+
+I built an open-source kill switch for AI agents and would love your support launching on Product Hunt!
+
+**Quick pitch:**
+$KILLSWITCH prevents AI agents from causing damage by validating every action in real-time. Think circuit breaker for AI.
+
+**Why it matters:**
+AI agents are getting powerful but lack safety controls. This gives developers an emergency stop + guardrails.
+
+**Traction so far:**
+- Open source (MIT)
+- Works with LangChain/AutoGPT
+- <100ms response time
+- Full audit trail
+
+Target audience: AI developers, automation teams, anyone using autonomous agents
+
+Would you consider hunting it? Happy to provide demos, early access, or anything else helpful!
+
+[Your contact info]
+
+
+LAUNCH CHECKLIST:
+----------------
+1 Week Before:
+□ Finish demo video
+□ Design thumbnail image
+□ Write all launch copy
+□ Test installation flow
+□ Deploy live demo site
+□ Prepare gallery images
+□ Alert email list
+□ Post teaser on Twitter
+
+3 Days Before:
+□ Schedule for Tuesday or Thursday 12:01 AM PST
+□ Line up supporter comments
+□ Prepare answers to common questions
+□ Test all links
+□ Social media graphics ready
+
+Launch Day:
+□ Post first comment immediately
+□ Respond to ALL comments within 30 min
+□ Share on Twitter/LinkedIn/Reddit
+□ Post in relevant Discord/Slack channels
+□ Monitor dashboard for issues
+□ Engage with community
+
+After Launch:
+□ Thank supporters
+□ Address all feedback
+□ Follow up with interested users
+□ Blog post about launch
+□ Incorporate feedback into roadmap
+
+
+COMMUNITIES TO SHARE IN:
+------------------------
+- r/MachineLearning
+- r/LocalLLaMA
+- r/artificial
+- LangChain Discord
+- AutoGPT Forum
+- HackerNews (after PH traction)
+- IndieHackers
+- Dev.to
+- Hacker News Monthly "Who's Hiring" thread

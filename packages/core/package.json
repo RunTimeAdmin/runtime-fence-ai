@@ -1,0 +1,20 @@
+{
+  "name": "@killswitch/core",
+  "version": "0.1.0",
+  "description": "Core kill switch engine for AI agents",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src/",
+    "test": "echo \"No tests configured\"",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "peerDependencies": {}
+}

@@ -1,0 +1,45 @@
+{
+  "name": "runtime-fence-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Agent Kill Switch - Complete safety ecosystem for AI agents",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "clean": "turbo run clean",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.1",
+    "@types/node": "^20.11.0",
+    "eslint": "^9.39.2",
+    "prettier": "^3.2.4",
+    "turbo": "^1.11.3",
+    "typescript": "^5.3.3"
+  },
+  "packageManager": "npm@10.2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RunTimeAdmin/runtime-fence-ai.git"
+  },
+  "keywords": [
+    "ai-safety",
+    "runtime-fence",
+    "agent-monitoring",
+    "spiffe",
+    "identity"
+  ],
+  "author": "RunTimeAdmin",
+  "license": "MIT"
+}

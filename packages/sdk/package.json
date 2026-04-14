@@ -1,0 +1,1 @@
+{"name":"@killswitch/sdk","version":"0.1.0","description":"SDK for integrating AI Agent Kill Switch","main":"dist/index.js","types":"dist/index.d.ts","scripts":{"build":"tsc","dev":"tsc --watch"},"dependencies":{"@killswitch/core":"*"},"devDependencies":{"@types/node":"^20.11.0","typescript":"^5.3.3"}}

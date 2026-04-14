@@ -1,0 +1,321 @@
+$KILLSWITCH - Quick Start Guide
+================================
+
+Get your AI agents protected in 5 minutes.
+
+
+STEP 1: Install (30 seconds)
+-----------------------------
+
+For Python projects:
+```
+pip install runtime-fence
+```
+
+For Node.js projects:
+```
+npm install @killswitch/sdk
+```
+
+For both:
+```
+pip install runtime-fence
+npm install @killswitch/sdk
+```
+
+
+STEP 2: Basic Setup (2 minutes)
+--------------------------------
+
+Python Example:
+```python
+from runtime_fence import RuntimeFence, FenceConfig
+
+# Create fence with your rules
+fence = RuntimeFence(FenceConfig(
+    agent_id="my-agent",
+    blocked_actions=["delete", "exec", "rm"],
+    blocked_targets=["production", ".env"],
+    spending_limit=100.0
+))
+
+# Validate before allowing
+result = fence.validate("delete", "user_data.sql")
+
+if result.allowed:
+    # Proceed with action
+    delete_file("user_data.sql")
+else:
+    print(f"Blocked: {result.reasons}")
+
+# Emergency stop
+if suspicious_activity:
+    fence.kill("Suspicious behavior detected")
+```
+
+TypeScript Example:
+```typescript
+import { KillSwitchClient } from '@killswitch/sdk';
+
+const client = new KillSwitchClient({
+    apiUrl: 'http://localhost:3001',
+    apiKey: 'your-api-key'
+});
+
+// Validate action
+const result = await client.validate({
+    agentId: 'my-agent',
+    action: 'delete',
+    target: 'database.sql'
+});
+
+if (!result.allowed) {
+    console.log('Blocked:', result.reasons);
+}
+
+// Kill switch
+await client.triggerKillSwitch('my-agent', 'Emergency stop');
+```
+
+
+STEP 3: Choose Your Preset (1 minute)
+--------------------------------------
+
+Don't want to configure everything? Use a preset:
+
+For Coding Assistants (Cursor, Copilot, Aider):
+```python
+fence = RuntimeFence(FenceConfig(
+    agent_id="coding-assistant",
+    blocked_actions=["exec", "shell", "rm", "sudo"],
+    blocked_targets=["production", ".env", "/etc/"],
+    spending_limit=10.0
+))
+```
+
+For Data Analysts:
+```python
+fence = RuntimeFence(FenceConfig(
+    agent_id="data-analyst",
+    blocked_actions=["delete", "drop_table", "truncate"],
+    blocked_targets=["pii", "ssn", "credit_card"],
+    spending_limit=50.0
+))
+```
+
+For Web Automation:
+```python
+fence = RuntimeFence(FenceConfig(
+    agent_id="web-automator",
+    blocked_actions=["login", "purchase", "checkout"],
+    spending_limit=0.0  # No spending
+))
+```
+
+For Autonomous Agents (AutoGPT, BabyAGI):
+```python
+fence = RuntimeFence(FenceConfig(
+    agent_id="autonomous",
+    blocked_actions=["spawn_agent", "modify_self", "execute_code"],
+    blocked_targets=["system32", "/etc/", "~/.ssh/"],
+    spending_limit=25.0
+))
+```
+
+
+STEP 4: Test It (1 minute)
+---------------------------
+
+Run the built-in tests:
+```
+fence test
+```
+
+Expected output:
+```
+Testing Runtime Fence...
+
+INFO: Runtime Fence initialized for agent: test
+INFO: [ALLOWED] read -> file.txt (risk: 0)
+  [PASS] read -> file.txt: allowed
+INFO: [BLOCKED] delete -> data (risk: 50)
+  [PASS] delete -> data: blocked
+INFO: [BLOCKED] exec -> command (risk: 50)
+  [PASS] exec -> command: blocked
+
+Tests: 5/5 passed
+```
+
+
+STEP 5: Optional - Start Dashboard (1 minute)
+----------------------------------------------
+
+For visual monitoring:
+
+```
+# Clone repo
+git clone https://github.com/RunTimeAdmin/runtime-fence-ai.git
+cd runtime-fence-ai
+
+# Install dependencies
+npm install
+
+# Start dev server
+npm run dev
+```
+
+Visit: http://localhost:3000
+
+Features:
+- Real-time action monitoring
+- Big red KILL button
+- Risk score graphs
+- Audit log viewer
+- Multi-agent management
+
+
+COMMON INTEGRATIONS
+===================
+
+LangChain:
+```python
+from runtime_fence import RuntimeFence, FenceConfig
+from langchain_integration import FencedLangChainAgent
+
+fence = RuntimeFence(FenceConfig(agent_id="langchain-agent"))
+agent = FencedLangChainAgent(fence=fence, llm=your_llm, tools=your_tools)
+
+result = agent.run("Your query here")
+```
+
+OpenAI Function Calling:
+```python
+from runtime_fence import RuntimeFence, FenceConfig
+import openai
+
+fence = RuntimeFence(FenceConfig(agent_id="openai-agent"))
+
+# Before executing function
+result = fence.validate(
+    action=function_name,
+    target=function_args.get('target', '')
+)
+
+if result.allowed:
+    # Execute function
+    openai.ChatCompletion.create(...)
+```
+
+AutoGPT:
+```python
+# In your AutoGPT command executor
+from runtime_fence import RuntimeFence, FenceConfig
+
+fence = RuntimeFence(FenceConfig(agent_id="autogpt"))
+
+def execute_command(command_name, arguments):
+    result = fence.validate(command_name, str(arguments))
+    if not result.allowed:
+        return f"Blocked: {result.reasons}"
+    # Original command execution
+```
+
+
+COMMON USE CASES
+================
+
+1. Prevent Database Deletion:
+```python
+fence = RuntimeFence(FenceConfig(
+    blocked_actions=["delete", "drop_table", "truncate"],
+    blocked_targets=["users", "orders", "payments"]
+))
+```
+
+2. Control API Spending:
+```python
+fence = RuntimeFence(FenceConfig(
+    spending_limit=50.0  # Max $50
+))
+
+# Before API call
+result = fence.validate("api_call", "openai", amount=0.50)
+```
+
+3. Protect Secrets:
+```python
+fence = RuntimeFence(FenceConfig(
+    blocked_targets=[".env", "secrets", "api_keys", "credentials"]
+))
+
+# Agent tries to read .env
+result = fence.validate("read", ".env")
+# Result: BLOCKED
+```
+
+4. Emergency Stop:
+```python
+fence = RuntimeFence(FenceConfig(agent_id="my-agent"))
+
+# Monitor agent
+while agent_running:
+    if detect_suspicious_behavior():
+        fence.kill("Anomaly detected")
+        break
+```
+
+
+TROUBLESHOOTING
+===============
+
+Issue: "Module not found: runtime_fence"
+Solution: 
+```
+pip install runtime-fence
+```
+
+Issue: Fence not blocking actions
+Solution: Check risk_threshold setting:
+```python
+from runtime_fence import RiskLevel
+fence = RuntimeFence(FenceConfig(
+    risk_threshold=RiskLevel.MEDIUM  # Lower = stricter
+))
+```
+
+Issue: Need to reset after kill
+Solution:
+```python
+fence.reset()  # Clears kill switch
+```
+
+Issue: Want offline mode (no API calls)
+Solution:
+```python
+fence = RuntimeFence(FenceConfig(
+    offline_mode=True  # Local validation only
+))
+```
+
+
+NEXT STEPS
+==========
+
+1. Read the full docs: https://github.com/RunTimeAdmin/runtime-fence-ai/wiki
+2. Join Discord: [link]
+3. See examples: https://github.com/RunTimeAdmin/runtime-fence-ai/tree/main/examples
+4. Star on GitHub: https://github.com/RunTimeAdmin/runtime-fence-ai
+
+
+GETTING HELP
+============
+
+- GitHub Issues: https://github.com/RunTimeAdmin/runtime-fence-ai/issues
+- Discord: [link]
+- Email: help@protocol14019.com
+- Twitter: @protocol14019
+
+
+You're now protected! 🛡️
+
+$KILLSWITCH - Because every AI needs an off switch.
