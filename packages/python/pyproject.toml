@@ -52,8 +52,11 @@ dev = [
 alerts = [
     "twilio>=8.0.0"
 ]
+embeddings = [
+    "sentence-transformers>=2.0.0"
+]
 all = [
-    "runtime-fence[dev,alerts]"
+    "runtime-fence[dev,alerts,embeddings]"
 ]
 
 [project.urls]

@@ -14,6 +14,17 @@ from functools import wraps
 from dataclasses import dataclass, field
 from enum import Enum
 
+# Fail-mode integration
+try:
+    from .fail_mode import FailModeHandler, FailModeConfig, FailMode
+    FAIL_MODE_AVAILABLE = True
+except ImportError:
+    try:
+        from fail_mode import FailModeHandler, FailModeConfig, FailMode
+        FAIL_MODE_AVAILABLE = True
+    except ImportError:
+        FAIL_MODE_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("runtime_fence")
 
@@ -39,6 +50,7 @@ class FenceConfig:
     log_all_actions: bool = True
     offline_mode: bool = False  # Skip API calls, local validation only
     reset_token: str = ""  # Optional token required for reset() authorization
+    fail_mode: str = "closed"  # "closed", "cached", or "open"
 
 
 @dataclass
@@ -65,6 +77,21 @@ class RuntimeFence:
         self.action_log: list[ActionResult] = []
         self.total_spent = 0.0
         logger.info(f"Runtime Fence initialized for agent: {config.agent_id}")
+        
+        # Initialize fail-mode handler if available
+        if FAIL_MODE_AVAILABLE:
+            mode_map = {
+                "closed": FailMode.CLOSED,
+                "cached": FailMode.CACHED,
+                "open": FailMode.OPEN
+            }
+            fm_config = FailModeConfig(
+                mode=mode_map.get(config.fail_mode.lower(), FailMode.CLOSED),
+                cache_ttl_seconds=300,
+            )
+            self._fail_handler = FailModeHandler(fm_config)
+        else:
+            self._fail_handler = None
 
     def validate(self, action: str, target: str, amount: float = 0.0, context: Dict = None) -> ActionResult:
         """
@@ -106,10 +133,37 @@ class RuntimeFence:
         if not self.config.offline_mode:
             try:
                 api_result = self._call_api(action, target, amount, context)
-                risk_score = max(risk_score, api_result.get("riskScore", 0))
+                api_risk_score = api_result.get("riskScore", 0)
+                risk_score = max(risk_score, api_risk_score)
                 reasons.extend(api_result.get("reasons", []))
+                
+                # Cache successful result for fail_mode
+                if self._fail_handler:
+                    self._fail_handler.cache_result(
+                        action, target, 
+                        risk_score < self._risk_threshold_value(),
+                        api_risk_score
+                    )
             except Exception as e:
-                logger.warning(f"API validation failed, using local only: {e}")
+                logger.warning(f"API validation failed: {e}")
+                
+                if self._fail_handler:
+                    # Use fail_mode strategy
+                    allowed_result, reason, fm_risk = self._fail_handler.on_validation_failure(action, target, e)
+                    if not allowed_result:
+                        logger.critical("FAIL-CLOSED: API unavailable, blocking action")
+                        risk_score = 100  # Block the action
+                        reasons.append(reason)
+                    else:
+                        # CACHED or OPEN mode
+                        if fm_risk > 0:
+                            logger.warning(f"FAIL-CACHED: Using cached policy")
+                            risk_score = max(risk_score, int(fm_risk))
+                        else:
+                            logger.warning("FAIL-OPEN: API unavailable, allowing with local-only validation")
+                else:
+                    # No fail_mode available — original behavior (local-only)
+                    logger.warning("Using local-only validation (fail_mode not available)")
 
         # Determine risk level
         risk_score = min(risk_score, 100)  # Clamp to valid range

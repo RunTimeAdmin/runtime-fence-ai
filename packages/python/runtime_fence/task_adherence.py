@@ -16,6 +16,10 @@ using cosine similarity and tracks cumulative drift over time.
 Copyright (c) 2025 David Cooper
 All rights reserved.
 PATENT PENDING (Application #63/940,202)
+
+NOTE: For effective semantic drift detection, install sentence-transformers:
+  pip install runtime-fence[embeddings]
+Without it, falls back to TF-IDF word frequency vectors (less accurate for short strings).
 """
 
 import math
@@ -29,6 +33,26 @@ from collections import deque
 import json
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# SENTENCE TRANSFORMERS SUPPORT
+# =============================================================================
+
+try:
+    from sentence_transformers import SentenceTransformer
+    _SENTENCE_MODEL = None  # Lazy-loaded
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+
+def _get_sentence_model():
+    """Lazy-load the sentence transformer model."""
+    global _SENTENCE_MODEL
+    if _SENTENCE_MODEL is None:
+        # Use a lightweight model (~80MB, fast inference)
+        _SENTENCE_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+    return _SENTENCE_MODEL
 
 
 # =============================================================================
@@ -123,9 +147,9 @@ class SimpleEmbedding:
             tf = {k: v / total for k, v in tf.items()}
         return tf
     
-    def embed(self, text: str) -> List[float]:
+    def _embed_tfidf(self, text: str) -> List[float]:
         """
-        Generate embedding vector for text.
+        Generate TF-IDF embedding vector for text (fallback method).
         
         Returns a sparse vector as a list of floats.
         """
@@ -149,6 +173,22 @@ class SimpleEmbedding:
             vector = [v / norm for v in vector]
         
         return vector
+    
+    def embed(self, text: str) -> List[float]:
+        """
+        Generate embedding for text. Uses sentence-transformers if available,
+        TF-IDF fallback.
+        """
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                model = _get_sentence_model()
+                embedding = model.encode(text, convert_to_numpy=True)
+                return embedding.tolist()
+            except Exception as e:
+                logger.warning(f"Sentence embedding failed, falling back to TF-IDF: {e}")
+        
+        # TF-IDF fallback (original implementation)
+        return self._embed_tfidf(text)
     
     @staticmethod
     def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:

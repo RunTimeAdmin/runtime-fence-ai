@@ -17,13 +17,43 @@ import json
 import time
 import hashlib
 import logging
+import tempfile
+import os
+import base64
+import socket
 from enum import Enum
 from typing import Dict, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Optional encryption support
+try:
+    from cryptography.fernet import Fernet
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    ENCRYPTION_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+
+def _get_cache_path() -> str:
+    """Get secure cache file path in system temp directory."""
+    cache_dir = os.path.join(tempfile.gettempdir(), '.runtime_fence')
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    return os.path.join(cache_dir, 'policy_cache.json')
+
+
+def _get_cache_key() -> bytes:
+    """Derive a machine-specific encryption key for cache."""
+    try:
+        # Use machine-specific identifiers for the key
+        machine_id = f"{socket.gethostname()}:{os.getlogin()}"
+    except (OSError, AttributeError):
+        # Fallback if os.getlogin() fails (e.g., in some container environments)
+        machine_id = f"{socket.gethostname()}:runtime_fence"
+    key_hash = hashlib.sha256(machine_id.encode()).digest()
+    return base64.urlsafe_b64encode(key_hash)
 
 # =============================================================================
 # FAIL MODE CONFIGURATION
@@ -67,7 +97,7 @@ class FailModeConfig:
     mode: FailMode = FailMode.CLOSED
     api_timeout_ms: int = 100
     cache_ttl_seconds: int = 60
-    cache_file_path: str = ".fence_policy_cache.json"
+    cache_file_path: str = field(default_factory=_get_cache_path)
     max_cache_entries: int = 10000
     alert_on_fail: bool = True
     log_level: str = "WARNING"
@@ -108,7 +138,7 @@ class CachedPolicy:
     def _compute_hash(self) -> str:
         """Compute hash for integrity verification"""
         data = f"{self.action}:{self.target}:{self.allowed}:{self.risk_score}:{self.cached_at}"
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
+        return hashlib.sha256(data.encode()).hexdigest()
 
 
 # =============================================================================
@@ -278,8 +308,25 @@ class PolicyCache:
         try:
             cache_path = Path(self.config.cache_file_path)
             if cache_path.exists():
-                with open(cache_path, 'r') as f:
-                    data = json.load(f)
+                with open(cache_path, 'rb') as f:
+                    file_content = f.read()
+                
+                # Try decryption if available
+                if ENCRYPTION_AVAILABLE:
+                    try:
+                        fernet = Fernet(_get_cache_key())
+                        file_content = fernet.decrypt(file_content)
+                    except Exception:
+                        # Fall back to plaintext if decryption fails
+                        logger.warning(
+                            "Cache decryption failed, trying plaintext"
+                        )
+                else:
+                    logger.warning(
+                        "Loading cache as plaintext (cryptography not available)"
+                    )
+                
+                data = json.loads(file_content.decode('utf-8'))
                 
                 for entry in data:
                     policy = CachedPolicy(**entry)
@@ -311,8 +358,20 @@ class PolicyCache:
                         "metadata": policy.metadata
                     })
             
-            with open(cache_path, 'w') as f:
-                json.dump(entries, f)
+            json_data = json.dumps(entries).encode('utf-8')
+            
+            # Encrypt if available
+            if ENCRYPTION_AVAILABLE:
+                fernet = Fernet(_get_cache_key())
+                file_content = fernet.encrypt(json_data)
+            else:
+                file_content = json_data
+                logger.warning(
+                    "Saving cache as plaintext (cryptography not available)"
+                )
+            
+            with open(cache_path, 'wb') as f:
+                f.write(file_content)
             
             logger.debug(f"Saved {len(entries)} policies to disk cache")
         except Exception as e:
