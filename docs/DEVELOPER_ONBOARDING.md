@@ -126,20 +126,7 @@ Reason: Critical system file access blocked
 │  │  • Action Validation (<1ms response)                │   │
 │  │  • Risk Scoring (0-100 scale)                       │   │
 │  │  • Behavioral Analysis                              │   │
-│  │  • Transaction Simulation                           │   │
 │  │  • Emergency Kill Switch                            │   │
-│  └────────────────────┬────────────────────────────────┘   │
-│                       │                                      │
-│                       │ Smart Contract Calls                 │
-│                       ↓                                      │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           Smart Contract Layer (Solana)              │   │
-│  │                                                      │   │
-│  │  • AIGuard.sol (Main contract)                       │   │
-│  │  • Allowance Module                                  │   │
-│  │  • Target Whitelist                                  │   │
-│  │  • Kill Switch                                       │   │
-│  │  • Blacklist System                                  │   │
 │  └─────────────────────────────────────────────────────┘   │
 └──────────────────────┬──────────────────────────────────────┘
                        │
@@ -168,18 +155,7 @@ Reason: Critical system file access blocked
 - `behavioral_analysis.py` - Behavioral pattern detection
 - `emergency_controls.py` - Kill switch and emergency actions
 
-#### 2. Smart Contracts
-
-**Location**: `/contracts/`
-
-**Purpose**: On-chain governance and security controls.
-
-**Key Files**:
-- `AIGuard.sol` - Main contract
-- `AllowanceModule.sol` - Permission management
-- `KillSwitch.sol` - Emergency controls
-
-#### 3. SDKs
+#### 2. SDKs
 
 **Location**: `/sdk/`
 
@@ -189,13 +165,13 @@ Reason: Critical system file access blocked
 - `sdk/python/` - Python SDK
 - `sdk/typescript/` - TypeScript/Node.js SDK
 
-#### 4. Tests
+#### 3. Tests
 
 **Location**: `/tests/`
 
 **Purpose**: Comprehensive test suite ensuring reliability.
 
-**Test Stats**: 82/82 tests passing (17 Solidity + 65 Python)
+**Test Stats**: 65/65 Python tests passing
 
 ---
 
@@ -285,13 +261,9 @@ pytest tests/test_risk_scoring.py -v
 
 # Run with coverage
 pytest --cov=runtime_fence tests/
-
-# Run Solidity tests
-cd contracts
-npm test
 ```
 
-### Step 7: Verify Setup
+### Step 6: Verify Setup
 
 ```bash
 # Run health check

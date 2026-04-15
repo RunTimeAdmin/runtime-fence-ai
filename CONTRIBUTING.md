@@ -47,7 +47,6 @@ test: add unit tests for kill switch
 
 - **TypeScript**: Follow ESLint configuration
 - **Python**: Follow PEP 8, use Black formatter
-- **Solidity**: Follow Solidity style guide
 
 ### Testing
 

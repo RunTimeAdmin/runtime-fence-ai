@@ -21,7 +21,7 @@
 - ✅ Web dashboard
 - ✅ CLI tools
 - ✅ Desktop tray app (Windows/Mac/Linux)
-- ✅ 82 tests passing (17 Solidity + 65 Python)
+- ✅ 65 Python tests passing
 
 ### Phase 2: Monetization ✅ COMPLETE
 - ✅ USD Subscriptions (Stripe integration)
@@ -72,7 +72,6 @@
 ## ✅ COMPLETED ITEMS
 
 ### 1. Core Platform ✅
-- ✅ Smart contracts complete
 - ✅ Python SDK (runtime_fence.py)
 - ✅ TypeScript SDK
 - ✅ REST API with JWT auth
@@ -81,7 +80,6 @@
 - ✅ Desktop tray app
 
 ### 2. Testing ✅
-- ✅ 17/17 smart contract tests passing
 - ✅ 65/65 Python unit tests passing
 - ✅ Type safety verified (mypy passing)
 
@@ -177,7 +175,7 @@
 - ✅ Core platform complete
 - ✅ Monetization complete
 - ✅ SPIFFE identity complete
-- ✅ All tests passing (82 total)
+- ✅ All tests passing (65 total)
 - ⚠️ Security audit needed
 
 **Technical Differentiators:**

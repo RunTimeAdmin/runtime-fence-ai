@@ -1,9 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { supabase, isSupabaseConfigured } from './db';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'killswitch-dev-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET as string;
+if (!JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is required.');
+  console.error('Generate one with: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"');
+  process.exit(1);
+}
 const JWT_EXPIRES = '24h';
 
 // In-memory user store (fallback when Supabase is not configured)
@@ -70,12 +76,7 @@ export function verifyToken(token: string): { id: string; email: string; role: s
 // ============================================
 
 export function generateApiKey(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let key = 'ks_';
-  for (let i = 0; i < 32; i++) {
-    key += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return key;
+  return 'ks_' + crypto.randomBytes(24).toString('hex');
 }
 
 // ============================================

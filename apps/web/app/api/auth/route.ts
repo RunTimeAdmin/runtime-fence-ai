@@ -2,14 +2,21 @@ import { supabase } from '../../../lib/supabase';
 import { NextRequest, NextResponse } from 'next/server';
 import { sign, verify } from 'jsonwebtoken';
 
-if (!process.env.NEXTAUTH_SECRET) {
-  throw new Error('NEXTAUTH_SECRET must be set in environment variables');
-}
+// Get JWT secret with fallback for build time
+const JWT_SECRET = process.env.NEXTAUTH_SECRET || 'build-time-placeholder-secret-do-not-use-in-production';
 
-const JWT_SECRET = process.env.NEXTAUTH_SECRET;
+// Validation function for runtime checks
+function validateAuthEnv() {
+  if (!process.env.NEXTAUTH_SECRET) {
+    throw new Error('NEXTAUTH_SECRET must be set in environment variables');
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
+    // Validate environment at runtime
+    validateAuthEnv();
+    
     const { walletAddress, action } = await req.json();
 
     if (action === 'login') {

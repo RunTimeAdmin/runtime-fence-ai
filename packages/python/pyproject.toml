@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "runtime-fence"
-version = "1.0.0"
+version = "1.1.0"
 description = "AI Agent Safety Control - Kill switch and guardrails for AI agents"
 readme = "README.md"
 license = {text = "MIT"}
@@ -71,6 +71,10 @@ fence-tray = "fence_tray:main"
 
 [tool.setuptools]
 py-modules = ["runtime_fence", "cli", "alerts", "agent_scanner", "fence_proxy", "fence_tray", "safe_resume"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runtime_fence*"]
 
 [tool.setuptools.package-data]
 runtime_fence = ["*.json", "*.yaml"]

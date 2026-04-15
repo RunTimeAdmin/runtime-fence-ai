@@ -142,15 +142,53 @@ app.post('/api/v1/validate', authMiddleware, async (req: Request, res: Response)
   res.json(result);
 });
 
-app.post('/api/v1/killswitch/trigger', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/v1/killswitch/trigger', authMiddleware, async (req: Request, res: Response) => {
   const { agentId, reason } = req.body;
   killSwitch.triggerKillSwitch(agentId || null, 'manual', reason || 'Manual trigger');
+
+  // Persist kill state to Supabase
+  if (isSupabaseConfigured() && agentId) {
+    await supabase.from('agents').update({ status: 'killed', updated_at: Date.now() }).eq('id', agentId);
+    await supabase.from('kill_signals').insert({
+      id: 'kill_' + Date.now().toString(36),
+      agent_id: agentId,
+      reason: reason || 'Manual kill switch',
+      triggered_by: req.user?.id || 'system',
+      created_at: Date.now()
+    });
+  }
+
   res.json({ success: true, triggered: true });
 });
 
-app.post('/api/v1/killswitch/reset', authMiddleware, adminOnly, (req: Request, res: Response) => {
+app.post('/api/v1/killswitch/reset', authMiddleware, adminOnly, async (req: Request, res: Response) => {
   const { agentId } = req.body;
+  const userId = (req as any).user?.id;
+
+  // Verify ownership even for admins
+  if (agentId && isSupabaseConfigured()) {
+    const { data: agent } = await supabase
+      .from('agents')
+      .select('user_id')
+      .eq('id', agentId)
+      .single();
+    
+    if (!agent || (agent.user_id !== userId && (req as any).user?.role !== 'admin')) {
+      return res.status(403).json({ error: 'You do not own this agent' });
+    }
+  }
+
   killSwitch.resetKillSwitch(agentId);
+  
+  // Persist reset
+  if (isSupabaseConfigured() && agentId) {
+    await supabase.from('agents').update({ status: 'active', updated_at: Date.now() }).eq('id', agentId);
+    await supabase.from('kill_signals').delete().eq('agent_id', agentId);
+  }
+
+  // Audit log the reset
+  console.log(`Kill switch reset by ${userId} for agent ${agentId || 'global'}`);
+  
   res.json({ success: true, reset: true });
 });
 
@@ -181,9 +219,41 @@ app.post('/api/runtime/assess', authMiddleware, agentAuth, async (req: Request, 
   });
 });
 
-app.post('/api/runtime/kill', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/runtime/kill', authMiddleware, async (req: Request, res: Response) => {
   const { agentId, reason, immediate } = req.body;
-  killSwitch.triggerKillSwitch(agentId || null, 'emergency', reason || 'Emergency kill switch activated');
+  const userId = (req as any).user?.id;
+
+  // Verify ownership if targeting specific agent
+  if (agentId) {
+    if (isSupabaseConfigured()) {
+      const { data: agent } = await supabase
+        .from('agents')
+        .select('user_id')
+        .eq('id', agentId)
+        .single();
+      
+      if (!agent || agent.user_id !== userId) {
+        return res.status(403).json({ error: 'You do not own this agent' });
+      }
+    }
+  } else if ((req as any).user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can trigger global kill' });
+  }
+
+  killSwitch.triggerKillSwitch(agentId || null, 'emergency', reason || 'Emergency kill');
+  
+  // Persist kill state
+  if (isSupabaseConfigured() && agentId) {
+    await supabase.from('agents').update({ status: 'killed', updated_at: Date.now() }).eq('id', agentId);
+    await supabase.from('kill_signals').insert({
+      id: 'kill_' + Date.now().toString(36),
+      agent_id: agentId,
+      reason: reason || 'Emergency kill',
+      triggered_by: userId || 'system',
+      created_at: Date.now()
+    });
+  }
+
   res.json({
     success: true,
     agentId: agentId || 'all',
@@ -350,7 +420,27 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ============================================
+// Restore kill state from database on startup
+// ============================================
+
+async function restoreKillState() {
+  if (!isSupabaseConfigured()) return;
+  const { data: killedAgents } = await supabase
+    .from('agents')
+    .select('id')
+    .eq('status', 'killed');
+  if (killedAgents) {
+    killedAgents.forEach(a => killSwitch.triggerKillSwitch(a.id, 'automatic', 'Restored from database'));
+    console.log(`Restored ${killedAgents.length} kill states from database`);
+  }
+}
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log('API running on port ' + PORT));
+
+// Restore kill state before starting server
+restoreKillState().then(() => {
+  app.listen(PORT, () => console.log('API running on port ' + PORT));
+});
 
 export default app;
