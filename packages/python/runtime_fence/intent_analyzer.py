@@ -264,6 +264,40 @@ Respond ONLY with valid JSON in this exact format:
         if not self.api_key:
             logger.warning("No OpenAI API key - LLM analysis disabled")
     
+    def _parse_llm_response(self, content: str) -> dict:
+        """Parse LLM JSON response with fallback strategies."""
+        # Strategy 1: Direct parse
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        
+        # Strategy 2: Strip markdown code fences
+        stripped = re.sub(r'```(?:json)?\s*', '', content).strip()
+        stripped = re.sub(r'```\s*$', '', stripped).strip()
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        
+        # Strategy 3: Find JSON object (handles nested braces)
+        depth = 0
+        start = -1
+        for i, ch in enumerate(content):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        return json.loads(content[start:i+1])
+                    except json.JSONDecodeError:
+                        start = -1
+        
+        return {}  # Return empty dict on failure
+    
     def analyze_intent(self, code: str) -> IntentAnalysis:
         """Analyze code intent using OpenAI"""
         import time
@@ -297,15 +331,9 @@ Respond ONLY with valid JSON in this exact format:
                 timeout=self.timeout
             )
             
-            # Parse response
+            # Parse response with robust JSON parsing
             content = response.choices[0].message.content.strip()
-            
-            # Extract JSON from response
-            json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = json.loads(content)
+            result = self._parse_llm_response(content)
             
             elapsed = (time.time() - start) * 1000
             

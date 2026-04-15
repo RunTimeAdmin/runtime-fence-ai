@@ -18,6 +18,8 @@ import time
 import random
 import hashlib
 import re
+import math
+from collections import Counter
 from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -144,13 +146,52 @@ class FakeDataGenerator:
 class DNSTunnelingDetector:
     """Detect DNS tunneling exfiltration attempts."""
 
+    # CDN/known long hostname patterns to whitelist
+    _CDN_PATTERNS = [
+        'cloudfront.net', 'amazonaws.com', 'akamaized.net', 'azureedge.net',
+        'cloudflare.com', 'fastly.net', 'googleapis.com', 'gstatic.com',
+        'cdn.jsdelivr.net', 'unpkg.com', 'cdnjs.cloudflare.com'
+    ]
+
     def __init__(self, entropy_threshold: float = 3.5, length_threshold: int = 50):
         self.entropy_threshold = entropy_threshold
         self.length_threshold = length_threshold
         self.suspicious_queries: List[str] = []
 
+    def _calculate_entropy(self, text: str) -> float:
+        """Calculate Shannon entropy of a string."""
+        if not text:
+            return 0.0
+        freq = Counter(text)
+        length = len(text)
+        return -sum((count/length) * math.log2(count/length) for count in freq.values())
+
+    def _is_dns_tunneling(self, hostname: str) -> Tuple[bool, str]:
+        """Detect DNS tunneling with reduced false positives."""
+        # Whitelist known CDN patterns
+        for cdn in self._CDN_PATTERNS:
+            if hostname.endswith(cdn):
+                return False, ""
+        
+        # Check for long random-looking subdomains
+        subdomain = hostname.split('.')[0] if '.' in hostname else hostname
+        
+        # Must be long AND high entropy (>3.5 bits/char indicates randomness)
+        if len(subdomain) >= 30:
+            entropy = self._calculate_entropy(subdomain)
+            if entropy > self.entropy_threshold:
+                return True, f"High entropy ({entropy:.2f}) in long subdomain"
+        
+        return False, ""
+
     def check_query(self, domain: str) -> Tuple[bool, str]:
         subdomain = domain.split(".")[0] if "." in domain else domain
+
+        # Use improved DNS tunneling detection
+        is_tunneling, reason = self._is_dns_tunneling(domain)
+        if is_tunneling:
+            self.suspicious_queries.append(domain)
+            return True, reason
 
         if len(subdomain) > self.length_threshold:
             self.suspicious_queries.append(domain)
@@ -166,20 +207,6 @@ class DNSTunnelingDetector:
             return True, "Hex-encoded data detected"
 
         return False, "OK"
-
-    def _calculate_entropy(self, text: str) -> float:
-        if not text:
-            return 0.0
-        freq = {}
-        for char in text:
-            freq[char] = freq.get(char, 0) + 1
-        length = len(text)
-        entropy = 0.0
-        for count in freq.values():
-            p = count / length
-            if p > 0:
-                entropy -= p * (p.bit_length() - 1 if p > 0 else 0)
-        return abs(entropy)
 
     def get_suspicious(self) -> List[str]:
         return list(self.suspicious_queries)

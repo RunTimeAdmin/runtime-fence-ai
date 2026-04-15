@@ -10,7 +10,7 @@
  * - Instant revocation = instant kill (30 seconds vs 24 hours)
  */
 
-import { supabase } from '../../../lib/supabase';
+import { supabase } from '../supabase';
 import crypto from 'crypto';
 
 // Trust domain for $KILLSWITCH

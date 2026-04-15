@@ -1,24 +1,20 @@
--- ============================================
--- Runtime Fence AI - Supabase Schema
--- ============================================
+-- =============================================================================
+-- Runtime Fence AI - Database Schema
+-- =============================================================================
+-- MIGRATION STRATEGY:
+-- - All tables use CREATE TABLE IF NOT EXISTS for idempotent execution
+-- - To add columns to existing tables, use ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+-- - NEVER use DROP TABLE in production — use migration scripts for destructive changes
+-- - Legacy token-era tables are dropped below (one-time cleanup)
+-- =============================================================================
 
--- Drop leftover tables from previous token economics (no longer needed)
+-- Legacy token-era tables (one-time cleanup, safe to remove after first migration)
 DROP TABLE IF EXISTS tier_limits CASCADE;
 DROP TABLE IF EXISTS subscriptions CASCADE;
 DROP TABLE IF EXISTS token_discounts CASCADE;
 DROP TABLE IF EXISTS proposals CASCADE;
 DROP TABLE IF EXISTS votes CASCADE;
 DROP TABLE IF EXISTS agent_identities CASCADE;
-
--- Drop existing tables (reverse dependency order) for clean recreation
-DROP TABLE IF EXISTS kill_signals CASCADE;
-DROP TABLE IF EXISTS agents CASCADE;
-DROP TABLE IF EXISTS usage_tracking CASCADE;
-DROP TABLE IF EXISTS audit_requests CASCADE;
-DROP TABLE IF EXISTS audit_logs CASCADE;
-DROP TABLE IF EXISTS user_settings CASCADE;
-DROP TABLE IF EXISTS rate_limits CASCADE;
-DROP TABLE IF EXISTS users CASCADE;
 
 -- ============================================
 -- TABLE DEFINITIONS
@@ -79,12 +75,41 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   user_agent TEXT,
   metadata JSONB DEFAULT '{}'::jsonb,
   previous_hash TEXT,
-  entry_hash TEXT,
+  entry_hash TEXT NOT NULL,
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_result ON audit_logs(result);
+
+-- Hash chain enforcement trigger for audit_logs
+CREATE OR REPLACE FUNCTION enforce_audit_hash_chain()
+RETURNS TRIGGER AS $$
+DECLARE
+  last_hash TEXT;
+BEGIN
+  -- entry_hash is required
+  IF NEW.entry_hash IS NULL OR NEW.entry_hash = '' THEN
+    RAISE EXCEPTION 'audit_logs.entry_hash cannot be null - hash chain integrity required';
+  END IF;
+
+  -- Auto-populate previous_hash from the last entry
+  SELECT entry_hash INTO last_hash
+  FROM audit_logs
+  ORDER BY created_at DESC, id DESC
+  LIMIT 1;
+
+  NEW.previous_hash := COALESCE(last_hash, 'GENESIS');
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_audit_hash_chain ON audit_logs;
+CREATE TRIGGER trg_audit_hash_chain
+  BEFORE INSERT ON audit_logs
+  FOR EACH ROW
+  EXECUTE FUNCTION enforce_audit_hash_chain();
 
 -- Audit requests (replaces index.ts audits Map)
 CREATE TABLE IF NOT EXISTS audit_requests (
@@ -133,6 +158,18 @@ CREATE TABLE IF NOT EXISTS kill_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_kills_agent ON kill_signals(agent_id);
 CREATE INDEX IF NOT EXISTS idx_kills_created ON kill_signals(created_at DESC);
+
+-- Token blacklist for JWT revocation
+CREATE TABLE IF NOT EXISTS token_blacklist (
+  id SERIAL PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_token_blacklist_hash ON token_blacklist(token_hash);
+CREATE INDEX IF NOT EXISTS idx_token_blacklist_expires ON token_blacklist(expires_at);
+
+ALTER TABLE token_blacklist ENABLE ROW LEVEL SECURITY;
 
 -- ============================================
 -- ROW LEVEL SECURITY (RLS)

@@ -4,12 +4,14 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { supabase, isSupabaseConfigured } from './db';
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
+const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is required.');
   console.error('Generate one with: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"');
   process.exit(1);
 }
+// TypeScript now knows JWT_SECRET is defined after the check
+const JWT_SECRET_VALID: string = JWT_SECRET;
 const JWT_EXPIRES = '24h';
 
 // In-memory user store (fallback when Supabase is not configured)
@@ -58,16 +60,50 @@ export function generateToken(user: User): string {
       email: user.email, 
       role: user.role 
     },
-    JWT_SECRET,
+    JWT_SECRET_VALID,
     { expiresIn: JWT_EXPIRES }
   );
 }
 
 export function verifyToken(token: string): { id: string; email: string; role: string } | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as { id: string; email: string; role: string };
+    return jwt.verify(token, JWT_SECRET_VALID) as { id: string; email: string; role: string };
   } catch {
     return null;
+  }
+}
+
+// ============================================
+// Token Blacklist (JWT Revocation)
+// ============================================
+
+// In-memory fallback blacklist
+const tokenBlacklist = new Set<string>();
+
+export async function isTokenRevoked(token: string): Promise<boolean> {
+  if (isSupabaseConfigured()) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const { data } = await supabase
+      .from('token_blacklist')
+      .select('id')
+      .eq('token_hash', tokenHash)
+      .gt('expires_at', new Date().toISOString())
+      .single();
+    return !!data;
+  }
+  return tokenBlacklist.has(token);
+}
+
+export async function revokeToken(token: string, expiresAt: Date): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    await supabase.from('token_blacklist').insert({
+      token_hash: tokenHash,
+      revoked_at: new Date().toISOString(),
+      expires_at: expiresAt.toISOString()
+    });
+  } else {
+    tokenBlacklist.add(token);
   }
 }
 
@@ -246,6 +282,13 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     const decoded = verifyToken(token);
     
     if (decoded) {
+      // Check if token has been revoked
+      const revoked = await isTokenRevoked(token);
+      if (revoked) {
+        res.status(401).json({ error: 'Token has been revoked' });
+        return;
+      }
+      
       const user = await getUserById(decoded.id);
       if (user) {
         req.user = user;
@@ -394,4 +437,60 @@ export function rateLimit(maxRequests: number = 100, windowMs: number = 60000) {
     
     next();
   };
+}
+
+// ============================================
+// Supabase-backed Rate Limiting (alternative approach)
+// ============================================
+
+// In-memory fallback for checkRateLimit
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+export async function checkRateLimit(
+  key: string, 
+  maxRequests: number = 100, 
+  windowMs: number = 60000
+): Promise<{ allowed: boolean; remaining: number }> {
+  if (isSupabaseConfigured()) {
+    const windowStart = new Date(Date.now() - windowMs).toISOString();
+    
+    // Count requests in current window
+    // Note: This requires rate_limits table to have 'created_at' column
+    // If using existing schema with 'request_count'/'window_reset_at', use the rateLimit middleware instead
+    const { count } = await supabase
+      .from('rate_limits')
+      .select('*', { count: 'exact', head: true })
+      .eq('key', key)
+      .gt('created_at', windowStart);
+    
+    const requestCount = count || 0;
+    
+    if (requestCount >= maxRequests) {
+      return { allowed: false, remaining: 0 };
+    }
+    
+    // Record this request
+    await supabase.from('rate_limits').insert({
+      key,
+      created_at: new Date().toISOString()
+    });
+    
+    return { allowed: true, remaining: maxRequests - requestCount - 1 };
+  }
+  
+  // In-memory fallback
+  const now = Date.now();
+  const record = rateLimitMap.get(key);
+  
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
+    return { allowed: true, remaining: maxRequests - 1 };
+  }
+  
+  record.count++;
+  if (record.count > maxRequests) {
+    return { allowed: false, remaining: 0 };
+  }
+  
+  return { allowed: true, remaining: maxRequests - record.count };
 }

@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import jwt from 'jsonwebtoken';
 import { KillSwitch, AgentConfig, TransactionRequest } from '@killswitch/core';
 import {
   authMiddleware,
@@ -13,7 +14,9 @@ import {
   verifyPassword,
   generateToken,
   generateApiKey,
-  updateUserApiKey
+  updateUserApiKey,
+  isTokenRevoked,
+  revokeToken
 } from './auth';
 import { supabase, isSupabaseConfigured } from './db';
 
@@ -124,6 +127,48 @@ app.get('/api/auth/me', authMiddleware, (req: Request, res: Response) => {
     role: req.user.role,
     createdAt: req.user.createdAt
   });
+});
+
+app.post('/api/auth/refresh', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Issue a new token with fresh expiry
+    const JWT_SECRET = process.env.JWT_SECRET;
+    const newToken = jwt.sign(
+      { id: req.user.id, email: req.user.email, role: req.user.role },
+      JWT_SECRET!,
+      { expiresIn: '24h' }
+    );
+    
+    // Revoke the old token
+    const oldToken = req.headers.authorization?.split(' ')[1];
+    if (oldToken) {
+      const decoded = jwt.decode(oldToken) as { exp?: number } | null;
+      const expiresAt = new Date((decoded?.exp || 0) * 1000);
+      await revokeToken(oldToken, expiresAt);
+    }
+    
+    res.json({ token: newToken, expiresIn: '24h' });
+  } catch (error) {
+    res.status(500).json({ error: 'Token refresh failed' });
+  }
+});
+
+app.post('/api/auth/revoke', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (token) {
+      const decoded = jwt.decode(token) as { exp?: number } | null;
+      const expiresAt = new Date((decoded?.exp || 0) * 1000);
+      await revokeToken(token, expiresAt);
+    }
+    res.json({ message: 'Token revoked successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Token revocation failed' });
+  }
 });
 
 // ============================================

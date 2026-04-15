@@ -17,7 +17,7 @@ import logging
 from enum import Enum
 from typing import Dict, List, Optional, Callable, Any, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 import threading
 
@@ -268,8 +268,8 @@ class BehavioralThresholds:
         # Cooldown tracking: agent_id -> action_type -> cooldown_end_time
         self._cooldowns: Dict[str, Dict[str, float]] = defaultdict(dict)
         
-        # Breach history for auditing
-        self._breach_history: List[ThresholdBreach] = []
+        # Breach history for auditing (bounded to prevent unbounded growth)
+        self._breach_history: deque = deque(maxlen=1000)
         
         # Statistics
         self._stats = {
@@ -575,13 +575,27 @@ class ExfiltrationDetector:
     
     def __init__(self):
         self._data_volumes: Dict[str, List[Tuple[float, int]]] = defaultdict(list)
-        self._unique_targets: Dict[str, set] = defaultdict(set)
+        self._unique_targets: Dict[str, list] = defaultdict(list)  # list of (timestamp, target) tuples
+        self._target_window_seconds: int = 3600  # 1-hour window for unique target counting
         
         # Thresholds
         self.max_data_volume_mb = 100  # 100 MB in 5 minutes
         self.max_unique_files = 1000    # 1000 unique files in 5 minutes
         self.max_unique_ips = 20        # 20 unique external IPs
         self.window_seconds = 300       # 5 minute window
+    
+    def _evict_stale_targets(self, agent_id: str):
+        """Remove targets older than the tracking window."""
+        cutoff = time.time() - self._target_window_seconds
+        self._unique_targets[agent_id] = [
+            (ts, target) for ts, target in self._unique_targets[agent_id]
+            if ts > cutoff
+        ]
+    
+    def _get_unique_target_count(self, agent_id: str) -> int:
+        """Get count of unique targets within the current window."""
+        self._evict_stale_targets(agent_id)
+        return len(set(target for _, target in self._unique_targets[agent_id]))
     
     def record_data_access(
         self,
@@ -600,7 +614,7 @@ class ExfiltrationDetector:
         
         # Record this access
         self._data_volumes[agent_id].append((now, bytes_accessed))
-        self._unique_targets[agent_id].add(target)
+        self._unique_targets[agent_id].append((time.time(), target))
         
         # Clean old entries
         self._data_volumes[agent_id] = [
@@ -615,9 +629,10 @@ class ExfiltrationDetector:
         if total_mb > self.max_data_volume_mb:
             return True, f"Data volume exceeded: {total_mb:.1f}MB in {self.window_seconds}s"
         
-        # Check unique targets (simplified - would track per window in production)
-        if len(self._unique_targets[agent_id]) > self.max_unique_files:
-            return True, f"Unique file access exceeded: {len(self._unique_targets[agent_id])} files"
+        # Check unique targets with time-windowed eviction
+        unique_count = self._get_unique_target_count(agent_id)
+        if unique_count > self.max_unique_files:
+            return True, f"Unique file access exceeded: {unique_count} files"
         
         return False, ""
     
@@ -638,7 +653,7 @@ class ExfiltrationDetector:
             "access_count": len(recent_accesses),
             "total_bytes": total_bytes,
             "total_mb": round(total_bytes / (1024 * 1024), 2),
-            "unique_targets": len(self._unique_targets.get(agent_id, set())),
+            "unique_targets": self._get_unique_target_count(agent_id),
             "window_seconds": self.window_seconds
         }
 
