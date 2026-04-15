@@ -167,7 +167,7 @@ app.get('/api/v1/agents/:agentId/status', authMiddleware, (req: Request, res: Re
 // Runtime Fence Endpoints (agent auth)
 // ============================================
 
-app.post('/api/runtime/assess', agentAuth, async (req: Request, res: Response) => {
+app.post('/api/runtime/assess', authMiddleware, agentAuth, async (req: Request, res: Response) => {
   const { agentId, action, context } = req.body;
   const tx = { agentId, action, target: context?.target || 'unknown', timestamp: Date.now() };
   const result = await killSwitch.validate(tx);

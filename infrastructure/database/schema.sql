@@ -1,3 +1,29 @@
+-- ============================================
+-- Runtime Fence AI - Supabase Schema
+-- ============================================
+
+-- Drop leftover tables from previous token economics (no longer needed)
+DROP TABLE IF EXISTS tier_limits CASCADE;
+DROP TABLE IF EXISTS subscriptions CASCADE;
+DROP TABLE IF EXISTS token_discounts CASCADE;
+DROP TABLE IF EXISTS proposals CASCADE;
+DROP TABLE IF EXISTS votes CASCADE;
+DROP TABLE IF EXISTS agent_identities CASCADE;
+
+-- Drop existing tables (reverse dependency order) for clean recreation
+DROP TABLE IF EXISTS kill_signals CASCADE;
+DROP TABLE IF EXISTS agents CASCADE;
+DROP TABLE IF EXISTS usage_tracking CASCADE;
+DROP TABLE IF EXISTS audit_requests CASCADE;
+DROP TABLE IF EXISTS audit_logs CASCADE;
+DROP TABLE IF EXISTS user_settings CASCADE;
+DROP TABLE IF EXISTS rate_limits CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+-- ============================================
+-- TABLE DEFINITIONS
+-- ============================================
+
 -- Users table (replaces auth.ts in-memory Map)
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -107,3 +133,57 @@ CREATE TABLE IF NOT EXISTS kill_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_kills_agent ON kill_signals(agent_id);
 CREATE INDEX IF NOT EXISTS idx_kills_created ON kill_signals(created_at DESC);
+
+-- ============================================
+-- ROW LEVEL SECURITY (RLS)
+-- ============================================
+-- Enable RLS on all tables. Access is controlled via the
+-- Supabase service key used by the API server (bypasses RLS).
+-- These policies ensure the PostgREST (anon/authenticated) API
+-- cannot read or write data directly without going through
+-- the API service.
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rate_limits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_tracking ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kill_signals ENABLE ROW LEVEL SECURITY;
+
+-- Service role policies (API server uses service key which bypasses RLS,
+-- but we add explicit policies for the authenticated role used by the frontend)
+
+-- Users: authenticated users can read their own row
+CREATE POLICY "Users can view own profile" ON users
+  FOR SELECT USING (auth.uid()::text = id);
+
+-- User settings: authenticated users can manage their own settings
+CREATE POLICY "Users can manage own settings" ON user_settings
+  FOR ALL USING (auth.uid()::text = user_id);
+
+-- Audit logs: authenticated users can read their own logs
+CREATE POLICY "Users can view own audit logs" ON audit_logs
+  FOR SELECT USING (auth.uid()::text = user_id);
+
+-- Audit requests: authenticated users can manage their own requests
+CREATE POLICY "Users can manage own audit requests" ON audit_requests
+  FOR ALL USING (auth.uid()::text = requester_id);
+
+-- Usage tracking: authenticated users can view their own usage
+CREATE POLICY "Users can view own usage" ON usage_tracking
+  FOR SELECT USING (auth.uid()::text = user_id);
+
+-- Agents: authenticated users can manage their own agents
+CREATE POLICY "Users can manage own agents" ON agents
+  FOR ALL USING (auth.uid()::text = user_id);
+
+-- Kill signals: authenticated users can view kills for their agents
+CREATE POLICY "Users can view own kill signals" ON kill_signals
+  FOR SELECT USING (
+    agent_id IN (SELECT id FROM agents WHERE user_id = auth.uid()::text)
+  );
+
+-- Rate limits: no direct access (managed entirely by API service)
+-- No policy needed — RLS enabled with no policy = deny all via PostgREST
