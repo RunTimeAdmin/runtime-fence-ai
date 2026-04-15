@@ -219,6 +219,8 @@ app.post('/api/runtime/assess', authMiddleware, agentAuth, async (req: Request, 
   });
 });
 
+// NOTE: Kill endpoint uses authMiddleware only (not agentAuth) because this is a USER action,
+// not an agent action. Tenant isolation is enforced below by verifying agent ownership.
 app.post('/api/runtime/kill', authMiddleware, async (req: Request, res: Response) => {
   const { agentId, reason, immediate } = req.body;
   const userId = (req as any).user?.id;

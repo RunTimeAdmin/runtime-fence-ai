@@ -7,6 +7,7 @@ import os
 import json
 import time
 import logging
+import inspect
 import requests
 from typing import Any, Callable, Dict, Optional
 from functools import wraps
@@ -37,6 +38,7 @@ class FenceConfig:
     auto_kill_on_critical: bool = True
     log_all_actions: bool = True
     offline_mode: bool = False  # Skip API calls, local validation only
+    reset_token: str = ""  # Optional token required for reset() authorization
 
 
 @dataclass
@@ -110,6 +112,7 @@ class RuntimeFence:
                 logger.warning(f"API validation failed, using local only: {e}")
 
         # Determine risk level
+        risk_score = min(risk_score, 100)  # Clamp to valid range
         if risk_score >= 90:
             risk_level = RiskLevel.CRITICAL
         elif risk_score >= 70:
@@ -190,11 +193,26 @@ class RuntimeFence:
         except Exception:
             pass
 
-    def reset(self):
-        """Reset the kill switch (requires confirmation)."""
+    def reset(self, reason: str = None, auth_token: str = None):
+        """Reset kill switch - requires reason for audit trail.
+        
+        Args:
+            reason: Required explanation for why the agent is being reset.
+            auth_token: Optional authorization token. If reset_token was configured,
+                       this must match to allow reset.
+        """
+        if not reason:
+            raise RuntimeError("reset() requires a reason parameter for audit trail")
+        
+        # Check authorization token if configured
+        if hasattr(self.config, 'reset_token') and self.config.reset_token:
+            if auth_token != self.config.reset_token:
+                logger.warning(f"Unauthorized reset attempt for agent - reason given: {reason}")
+                raise PermissionError("Invalid or missing auth_token for reset")
+        
         self.killed = False
         self.total_spent = 0.0
-        logger.info("Kill switch reset - agent can resume actions")
+        logger.info(f"Kill switch reset - reason: {reason}")
 
     def wrap_function(self, action_name: str, target: str = "unknown"):
         """
@@ -208,8 +226,18 @@ class RuntimeFence:
         def decorator(func: Callable) -> Callable:
             @wraps(func)
             def wrapper(*args, **kwargs):
-                # Extract amount if present
+                # Check kwargs first, then inspect positional args for 'amount'
                 amount = kwargs.get("amount", 0.0)
+                if amount == 0.0 and args:
+                    try:
+                        sig = inspect.signature(func)
+                        params = list(sig.parameters.keys())
+                        if 'amount' in params:
+                            idx = params.index('amount')
+                            if idx < len(args):
+                                amount = float(args[idx])
+                    except (ValueError, TypeError):
+                        pass
                 
                 # Validate through fence
                 result = self.validate(action_name, target, amount)

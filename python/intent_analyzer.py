@@ -525,7 +525,7 @@ class IntentAnalyzer:
             IntentAnalysis with results
         """
         # Check cache
-        code_hash = hashlib.md5(code.encode()).hexdigest()
+        code_hash = hashlib.sha256(code.encode()).hexdigest()
         if use_cache and code_hash in self._cache:
             self._cache_hits += 1
             return self._cache[code_hash]

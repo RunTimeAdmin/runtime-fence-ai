@@ -18,11 +18,13 @@ PATENT PENDING (Application #63/940,202)
 
 import os
 import sys
+import hmac
 import hashlib
 import logging
 import importlib
 import inspect
 import threading
+import builtins
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable, Any
 from dataclasses import dataclass, field
@@ -116,10 +118,10 @@ class HashManifest:
         }
         
         if sign_key:
-            # In production, would use proper cryptographic signing
+            # Use proper HMAC for cryptographic signing
             manifest_str = json.dumps(self._hashes, sort_keys=True)
-            data['signature'] = hashlib.sha256(
-                f"{manifest_str}:{sign_key}".encode()
+            data['signature'] = hmac.new(
+                sign_key.encode(), manifest_str.encode(), hashlib.sha256
             ).hexdigest()
         
         if self.manifest_path:
@@ -458,8 +460,8 @@ class RuntimeTamperDetector:
                 self._module_hashes[mod_name] = self._hash_module(mod)
         
         # Install import hook
-        self._original_import = __builtins__.get('__import__', __import__)
-        __builtins__['__import__'] = self._protected_import
+        self._original_import = builtins.__import__
+        builtins.__import__ = self._protected_import
         
         self._monitoring = True
         logger.info(f"Runtime tamper detection started for {len(self.protected_modules)} modules")
@@ -471,7 +473,7 @@ class RuntimeTamperDetector:
         
         # Restore original import
         if self._original_import:
-            __builtins__['__import__'] = self._original_import
+            builtins.__import__ = self._original_import
         
         self._monitoring = False
     

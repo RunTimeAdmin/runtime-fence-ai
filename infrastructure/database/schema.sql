@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   api_key TEXT UNIQUE NOT NULL,
   role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin', 'agent')),
-  tier TEXT DEFAULT 'basic',
+  tier TEXT DEFAULT 'basic' CHECK (tier IN ('basic', 'pro', 'team', 'enterprise')),
   created_at BIGINT NOT NULL,
   updated_at BIGINT
 );
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   action TEXT NOT NULL,
   target TEXT NOT NULL,
   result TEXT NOT NULL CHECK (result IN ('allowed', 'blocked', 'killed')),
-  risk_score NUMERIC NOT NULL DEFAULT 0,
+  risk_score SMALLINT NOT NULL DEFAULT 0,
   risk_level TEXT NOT NULL DEFAULT 'low',
   reasons TEXT[] DEFAULT '{}',
   ip_address TEXT,
