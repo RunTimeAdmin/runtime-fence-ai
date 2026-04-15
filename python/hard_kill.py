@@ -23,6 +23,7 @@ import signal
 import logging
 import subprocess
 import platform
+import random
 from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -388,13 +389,36 @@ class HardKill:
             return False
     
     def _wait_for_death(self, pid: int, timeout: float) -> bool:
-        """Wait for process to die within timeout"""
+        """Wait for process to die within timeout with efficient polling."""
         start = time.time()
+        interval = self.verify_interval
+        max_interval = 1.0  # Cap at 1 second
+
         while time.time() - start < timeout:
-            if not is_process_alive(pid):
-                return True
-            time.sleep(self.verify_interval)
-        return False
+            # Try os.waitpid for child processes (Unix only, most efficient)
+            if hasattr(os, 'waitpid') and sys.platform != 'win32':
+                try:
+                    result = os.waitpid(pid, os.WNOHANG)
+                    if result[0] != 0:
+                        return True  # Process exited
+                except ChildProcessError:
+                    # Not our child — fall through to psutil check
+                    pass
+                except OSError:
+                    return True  # Process doesn't exist anymore
+
+            # Fallback: check via os.kill(pid, 0)
+            try:
+                os.kill(pid, 0)  # Signal 0 = check existence
+            except (OSError, ProcessLookupError):
+                return True  # Process is gone
+
+            # Exponential backoff with jitter to avoid CPU waste
+            jitter = random.uniform(0.8, 1.2)
+            time.sleep(interval * jitter)
+            interval = min(interval * 1.5, max_interval)  # Backoff up to 1s
+
+        return False  # Timeout — process still alive
     
     def _verify_death(self, pid: int) -> bool:
         """Verify process is truly dead after hard kill"""
@@ -470,7 +494,19 @@ class BatchKill:
         return children
     
     def _get_children_unix(self, pid: int) -> List[int]:
-        """Get child PIDs on Unix"""
+        """Get child PIDs on Unix using psutil for full process tree."""
+        try:
+            import psutil
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            # Return PIDs in reverse order (kill children first, then parent)
+            return [c.pid for c in reversed(children)]
+        except (ImportError, psutil.NoSuchProcess, psutil.AccessDenied):
+            # Fallback to pgrep if psutil fails
+            return self._get_children_unix_pgrep(pid)
+
+    def _get_children_unix_pgrep(self, pid: int) -> List[int]:
+        """Fallback: get process tree via pgrep (direct children only)."""
         children = []
         try:
             result = subprocess.run(
@@ -485,7 +521,7 @@ class BatchKill:
                         child_pid = int(line)
                         children.append(child_pid)
                         # Recursively get grandchildren
-                        children.extend(self._get_children_unix(child_pid))
+                        children.extend(self._get_children_unix_pgrep(child_pid))
         except Exception:
             pass
         return children
