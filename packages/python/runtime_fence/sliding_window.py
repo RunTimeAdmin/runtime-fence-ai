@@ -169,7 +169,8 @@ class SlidingWindowDetector:
         self,
         agent_id: str,
         thresholds: List[WindowThreshold] = None,
-        on_breach: Callable[[ThresholdBreach], None] = None
+        on_breach: Callable[[ThresholdBreach], None] = None,
+        breach_cooldown_seconds: float = 60.0
     ):
         self.agent_id = agent_id
         self.thresholds = thresholds or DEFAULT_THRESHOLDS
@@ -182,7 +183,20 @@ class SlidingWindowDetector:
         self.breaches: List[ThresholdBreach] = []
         self._breach_count = 0
 
+        # Debounce tracking for breach callbacks
+        self._last_breach_time: Dict[str, float] = {}  # key -> timestamp
+        self._breach_cooldown_seconds: float = breach_cooldown_seconds
+
         logger.info(f"SlidingWindowDetector initialized for {agent_id}")
+
+    def _should_fire_breach(self, breach_key: str) -> bool:
+        """Check if breach callback should fire (debounce)."""
+        now = time.time()
+        last = self._last_breach_time.get(breach_key, 0)
+        if now - last < self._breach_cooldown_seconds:
+            return False
+        self._last_breach_time[breach_key] = now
+        return True
 
     def record(self, metric: MetricType, value: float, ts: float = None):
         self.trackers[metric].record(value, ts)
@@ -233,7 +247,16 @@ class SlidingWindowDetector:
                 )
 
                 if self.on_breach:
-                    self.on_breach(breach)
+                    breach_key = (
+                        f"{self.agent_id}:{threshold.metric.value}:"
+                        f"{threshold.window.value}"
+                    )
+                    if self._should_fire_breach(breach_key):
+                        self.on_breach(breach)
+                    else:
+                        logger.debug(
+                            f"Breach callback debounced for {breach_key}"
+                        )
 
         return breaches
 

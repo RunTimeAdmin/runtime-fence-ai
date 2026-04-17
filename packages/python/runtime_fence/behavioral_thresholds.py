@@ -14,6 +14,9 @@ PATENT PENDING (Application #63/940,202)
 
 import time
 import logging
+import sqlite3
+import os
+import tempfile
 from enum import Enum
 from typing import Dict, List, Optional, Callable, Any, Tuple
 from dataclasses import dataclass, field
@@ -22,6 +25,145 @@ from datetime import datetime, timedelta
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# THRESHOLD PERSISTENCE (SQLite)
+# =============================================================================
+
+class ThresholdPersistence:
+    """
+    SQLite-backed persistence for behavioral threshold counters.
+
+    Provides durable storage for action counts and breach history,
+    allowing state to survive process restarts.
+    """
+
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            cache_dir = os.path.join(tempfile.gettempdir(), '.runtime_fence')
+            os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+            db_path = os.path.join(cache_dir, 'thresholds.db')
+
+        self._db_path = db_path
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._init_schema()
+
+    def _init_schema(self):
+        """Initialize database schema."""
+        self._conn.execute('''
+            CREATE TABLE IF NOT EXISTS action_counts (
+                agent_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                count INTEGER DEFAULT 0,
+                window_start REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (agent_id, action_type, window_start)
+            )
+        ''')
+        self._conn.execute('''
+            CREATE TABLE IF NOT EXISTS breach_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                threshold_key TEXT NOT NULL,
+                action_type TEXT,
+                count INTEGER,
+                limit_val INTEGER,
+                created_at REAL NOT NULL
+            )
+        ''')
+        self._conn.commit()
+
+    def record_action(
+        self,
+        agent_id: str,
+        action_type: str,
+        window_start: float
+    ):
+        """Increment action count for agent in current window."""
+        now = time.time()
+        self._conn.execute('''
+            INSERT INTO action_counts
+                (agent_id, action_type, count, window_start, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(agent_id, action_type, window_start)
+            DO UPDATE SET count = count + 1, updated_at = ?
+        ''', (agent_id, action_type, window_start, now, now))
+        self._conn.commit()
+
+    def get_action_count(
+        self,
+        agent_id: str,
+        action_type: str,
+        window_start: float
+    ) -> int:
+        """Get action count for agent in current window."""
+        cursor = self._conn.execute(
+            'SELECT count FROM action_counts '
+            'WHERE agent_id=? AND action_type=? AND window_start>=?',
+            (agent_id, action_type, window_start)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+    def record_breach(
+        self,
+        agent_id: str,
+        threshold_key: str,
+        action_type: str,
+        count: int,
+        limit_val: int
+    ):
+        """Record a threshold breach."""
+        self._conn.execute(
+            'INSERT INTO breach_history '
+            '(agent_id, threshold_key, action_type, count, limit_val, '
+            'created_at) VALUES (?,?,?,?,?,?)',
+            (agent_id, threshold_key, action_type, count, limit_val,
+             time.time())
+        )
+        self._conn.commit()
+
+    def get_recent_breaches(
+        self,
+        agent_id: str,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Get recent breaches for an agent."""
+        cursor = self._conn.execute(
+            'SELECT agent_id, threshold_key, action_type, count, '
+            'limit_val, created_at FROM breach_history '
+            'WHERE agent_id=? ORDER BY created_at DESC LIMIT ?',
+            (agent_id, limit)
+        )
+        breaches = []
+        for row in cursor.fetchall():
+            breaches.append({
+                'agent_id': row[0],
+                'threshold_key': row[1],
+                'action_type': row[2],
+                'count': row[3],
+                'limit_val': row[4],
+                'created_at': row[5]
+            })
+        return breaches
+
+    def cleanup_old(self, max_age_hours: int = 24):
+        """Remove records older than max_age."""
+        cutoff = time.time() - (max_age_hours * 3600)
+        self._conn.execute(
+            'DELETE FROM action_counts WHERE updated_at < ?',
+            (cutoff,)
+        )
+        self._conn.execute(
+            'DELETE FROM breach_history WHERE created_at < ?',
+            (cutoff,)
+        )
+        self._conn.commit()
+
+    def close(self):
+        """Close the database connection."""
+        self._conn.close()
 
 
 # =============================================================================
@@ -246,31 +388,37 @@ class BehavioralThresholds:
         self,
         thresholds: List[ThresholdConfig] = None,
         on_breach: Callable[[ThresholdBreach], None] = None,
-        on_kill: Callable[[str, ThresholdBreach], None] = None
+        on_kill: Callable[[str, ThresholdBreach], None] = None,
+        persist: bool = True,
+        db_path: str = None
     ):
         """
         Initialize behavioral thresholds.
-        
+
         Args:
             thresholds: Custom threshold configurations (uses defaults if None)
             on_breach: Callback when threshold is breached
             on_kill: Callback when agent should be killed
+            persist: Enable SQLite persistence for action counts
+            db_path: Custom path for persistence database
         """
-        self.thresholds = {t.action_type: t for t in (thresholds or DEFAULT_THRESHOLDS)}
+        self.thresholds = {
+            t.action_type: t for t in (thresholds or DEFAULT_THRESHOLDS)
+        }
         self.on_breach = on_breach
         self.on_kill = on_kill
-        
+
         # Action history per agent: agent_id -> action_type -> [timestamps]
         self._action_history: Dict[str, Dict[str, List[float]]] = defaultdict(
             lambda: defaultdict(list)
         )
-        
+
         # Cooldown tracking: agent_id -> action_type -> cooldown_end_time
         self._cooldowns: Dict[str, Dict[str, float]] = defaultdict(dict)
-        
+
         # Breach history for auditing (bounded to prevent unbounded growth)
         self._breach_history: deque = deque(maxlen=1000)
-        
+
         # Statistics
         self._stats = {
             "total_checks": 0,
@@ -279,11 +427,25 @@ class BehavioralThresholds:
             "total_kills": 0,
             "breaches_by_type": defaultdict(int)
         }
-        
+
         # Thread lock for concurrent access
         self._lock = threading.RLock()
-        
-        logger.info(f"BehavioralThresholds initialized with {len(self.thresholds)} thresholds")
+
+        # SQLite persistence (optional)
+        self._persistence = None
+        if persist:
+            try:
+                self._persistence = ThresholdPersistence(db_path)
+                logger.info(
+                    "Behavioral threshold persistence enabled (SQLite)"
+                )
+            except Exception as e:
+                logger.warning(f"Threshold persistence unavailable: {e}")
+
+        logger.info(
+            f"BehavioralThresholds initialized with {len(self.thresholds)} "
+            f"thresholds"
+        )
     
     def check_action(
         self,
@@ -380,8 +542,21 @@ class BehavioralThresholds:
         timestamp: float,
         metadata: Dict[str, Any] = None
     ):
-        """Record an action for threshold tracking"""
+        """Record an action for threshold tracking."""
         self._action_history[agent_id][action_type].append(timestamp)
+
+        # Persist to SQLite if available
+        if self._persistence:
+            try:
+                # Calculate window start for this action
+                threshold = self.thresholds.get(action_type)
+                window_seconds = threshold.window_seconds if threshold else 60
+                window_start = timestamp - window_seconds
+                self._persistence.record_action(
+                    agent_id, action_type, window_start
+                )
+            except Exception as e:
+                logger.warning(f"Persistence write failed: {e}")
     
     def _is_in_cooldown(
         self,
@@ -425,6 +600,19 @@ class BehavioralThresholds:
         
         # Record breach
         self._breach_history.append(breach)
+        
+        # Persist breach to SQLite if available
+        if self._persistence:
+            try:
+                self._persistence.record_breach(
+                    agent_id=agent_id,
+                    threshold_key=threshold.name,
+                    action_type=threshold.action_type,
+                    count=count,
+                    limit_val=threshold.max_count
+                )
+            except Exception as e:
+                logger.warning(f"Breach persistence write failed: {e}")
         
         # Set cooldown
         self._cooldowns[agent_id][threshold.action_type] = now + threshold.cooldown_seconds

@@ -15,6 +15,7 @@ PATENT PENDING (Application #63/940,202)
 """
 
 import os
+import atexit
 import subprocess
 import platform
 import logging
@@ -954,18 +955,85 @@ class NetworkKillManager:
     def __init__(self, cloud_provider: str = None):
         """
         Initialize network kill manager.
-        
+    
         Args:
             cloud_provider: Optional cloud provider for VPC integration
         """
         self.platform = platform.system()
+        self._has_net_capabilities = True  # Assume capable until checked
         self.firewall = self._get_firewall()
         self.cloud = CloudFirewall(cloud_provider) if cloud_provider else None
-        
+    
         # Track blocked agents
         self._blocked_agents: Dict[str, NetworkKillReport] = {}
-        
+    
+        # Check capabilities before registering cleanup
+        self._check_capabilities()
+    
+        # Register cleanup on process exit
+        atexit.register(self._cleanup_on_exit)
+    
         logger.info(f"NetworkKillManager initialized for {self.platform}")
+    
+    def _check_capabilities(self):
+        """Check if we have network administration capabilities."""
+        system = platform.system()
+    
+        if system == "Linux":
+            if os.geteuid() != 0:
+                # Check for NET_ADMIN capability
+                try:
+                    with open(f'/proc/{os.getpid()}/status', 'r') as f:
+                        for line in f:
+                            if line.startswith('CapEff:'):
+                                cap_hex = int(line.split(':')[1].strip(), 16)
+                                has_net_admin = bool(cap_hex & (1 << 12))
+                                if not has_net_admin:
+                                    logger.warning(
+                                        "No root or NET_ADMIN capability — "
+                                        "network_kill.py will use "
+                                        "application-level kill only. "
+                                        "Run with: sudo setcap "
+                                        "cap_net_admin+ep $(which python)"
+                                    )
+                                    self._has_net_capabilities = False
+                                    return
+                except Exception:
+                    pass
+                logger.warning(
+                    "No root — network_kill.py will use app-level kill only"
+                )
+                self._has_net_capabilities = False
+                return
+    
+        elif system == "Darwin":
+            if os.geteuid() != 0:
+                logger.warning(
+                    "No root — macOS pf rules require sudo, "
+                    "using app-level kill only"
+                )
+                self._has_net_capabilities = False
+                return
+    
+        elif system == "Windows":
+            import ctypes
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                logger.warning(
+                    "Not running as Administrator — "
+                    "netsh rules unavailable"
+                )
+                self._has_net_capabilities = False
+                return
+    
+        self._has_net_capabilities = True
+    
+    def _cleanup_on_exit(self):
+        """Restore all network rules on process exit."""
+        try:
+            self.restore_all_network()
+            logger.info("Network rules cleaned up on exit")
+        except Exception as e:
+            logger.error(f"Failed to clean up network rules on exit: {e}")
     
     def _get_firewall(self) -> FirewallInterface:
         """Get appropriate firewall for current platform"""
@@ -1006,10 +1074,21 @@ class NetworkKillManager:
             cloud_report = self.cloud.block_instance(instance_id)
             reports.append(cloud_report)
         
-        # OS-level block
+        # OS-level block (only if we have capabilities)
         identifier = str(pid) if pid else str(uid) if uid else agent_id
-        os_report = self.firewall.block_all_traffic(identifier)
-        reports.append(os_report)
+        if self._has_net_capabilities:
+            os_report = self.firewall.block_all_traffic(identifier)
+            reports.append(os_report)
+        else:
+            # No firewall capabilities - report as permission denied
+            os_report = NetworkKillReport(
+                agent_id=identifier,
+                result=NetworkKillResult.PERMISSION_DENIED,
+                platform=self.platform,
+                rules_applied=[],
+                error="No firewall capabilities - application-level kill only"
+            )
+            reports.append(os_report)
         
         # Determine overall result
         success_count = sum(

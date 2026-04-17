@@ -5,11 +5,12 @@ This module implements escalating kill strategies to ensure agent processes
 are truly terminated, even when unresponsive to soft signals.
 
 Kill Sequence:
-1. SIGTERM (soft) - Give process chance to cleanup
-2. Wait 2 seconds - Allow graceful shutdown
-3. Check if alive - Verify termination
-4. SIGKILL (hard) - Force termination if still alive
-5. Verify death - Confirm process is gone
+1. Process-group kill (Unix only) - Kill entire process group atomically
+2. SIGTERM (soft) - Give process chance to cleanup
+3. Wait 2 seconds - Allow graceful shutdown
+4. Check if alive - Verify termination
+5. SIGKILL (hard) - Force termination if still alive
+6. Verify death - Confirm process is gone
 
 Copyright (c) 2025 David Cooper
 All rights reserved.
@@ -267,7 +268,25 @@ class HardKill:
                 time_to_death_ms=0
             )
         
-        # Step 2: Send soft kill (SIGTERM)
+        # Step 2: Try process-group kill first on Unix (more thorough)
+        if sys.platform != 'win32':
+            pg_success = self._kill_process_group(pid)
+            if pg_success:
+                # Wait briefly for process group to die
+                if self._wait_for_death(pid, self.soft_timeout):
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    logger.info(
+                        f"PID {pid} terminated via process-group kill "
+                        f"in {elapsed_ms:.0f}ms"
+                    )
+                    return KillReport(
+                        pid=pid,
+                        result=KillResult.SOFT_KILL_SUCCESS,
+                        soft_signal_sent=True,
+                        time_to_death_ms=elapsed_ms
+                    )
+        
+        # Step 3: Send soft kill (SIGTERM) to individual process
         soft_success = self._send_soft_kill(pid)
         
         if not soft_success:
@@ -279,7 +298,7 @@ class HardKill:
                 error="Failed to send SIGTERM - check permissions"
             )
         
-        # Step 3: Wait and check if dead
+        # Step 4: Wait and check if dead
         if self._wait_for_death(pid, self.soft_timeout):
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info(f"PID {pid} terminated gracefully in {elapsed_ms:.0f}ms")
@@ -300,7 +319,7 @@ class HardKill:
                 error="Process did not respond to SIGTERM and escalation is disabled"
             )
         
-        # Step 4: Escalate to hard kill (SIGKILL)
+        # Step 5: Escalate to hard kill (SIGKILL)
         logger.warning(f"PID {pid} did not respond to SIGTERM, escalating to SIGKILL")
         
         hard_success = self._send_hard_kill(pid)
@@ -314,7 +333,7 @@ class HardKill:
                 error="Failed to send SIGKILL"
             )
         
-        # Step 5: Verify death after hard kill
+        # Step 6: Verify death after hard kill
         if self._verify_death(pid):
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info(f"PID {pid} terminated via SIGKILL in {elapsed_ms:.0f}ms")
@@ -427,6 +446,34 @@ class HardKill:
                 return True
             time.sleep(self.verify_interval)
         return not is_process_alive(pid)
+
+    def _kill_process_group(self, pid: int) -> bool:
+        """
+        Try to kill the entire process group.
+
+        This is more effective than killing individual PIDs because it
+        ensures all child processes are terminated atomically.
+
+        Args:
+            pid: Process ID to get process group for
+
+        Returns:
+            True if process group kill was initiated, False otherwise
+        """
+        # Only available on Unix systems
+        if sys.platform == 'win32':
+            return False
+
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            logger.info(
+                f"Sent SIGTERM to process group {pgid} (from PID {pid})"
+            )
+            return True
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            logger.warning(f"Process group kill failed for PID {pid}: {e}")
+            return False
 
 
 # =============================================================================

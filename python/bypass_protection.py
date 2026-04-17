@@ -35,6 +35,14 @@ import json
 logger = logging.getLogger(__name__)
 
 
+class SecurityError(Exception):
+    """Raised when security verification fails.
+
+    Examples: manifest signature mismatch, tampering detected.
+    """
+    pass
+
+
 # =============================================================================
 # INTEGRITY STATUS
 # =============================================================================
@@ -91,23 +99,78 @@ class HashManifest:
     3. Embedded in the code (most secure)
     """
     
-    def __init__(self, manifest_path: str = None):
+    def __init__(self, manifest_path: str = None, sign_key: str = None):
         self.manifest_path = manifest_path
+        self._sign_key = sign_key
         self._hashes: Dict[str, str] = {}
         self._signature: Optional[str] = None
-        
+            
         if manifest_path and Path(manifest_path).exists():
-            self._load_manifest()
+            self._load_manifest(sign_key=sign_key)
     
-    def _load_manifest(self):
-        """Load manifest from file"""
+    def _load_manifest(self, sign_key: str = None) -> dict:
+        """
+        Load manifest from disk with signature verification.
+            
+        Args:
+            sign_key: Optional signing key for HMAC verification.
+                     If provided, the manifest signature will be verified.
+            
+        Returns:
+            The loaded manifest data dictionary.
+                
+        Raises:
+            SecurityError: If signature verification fails or signature
+                is missing when sign_key is provided.
+        """
         try:
             with open(self.manifest_path, 'r') as f:
                 data = json.load(f)
-                self._hashes = data.get('hashes', {})
-                self._signature = data.get('signature')
         except Exception as e:
             logger.error(f"Failed to load manifest: {e}")
+            return {}
+            
+        # Verify signature if a signing key is provided
+        if sign_key:
+            if 'signature' not in data:
+                logger.warning(
+                    "Manifest has no signature but signing key was provided — "
+                    "treating as untrusted"
+                )
+                raise SecurityError(
+                    "Unsigned manifest cannot be trusted "
+                    "when signing is required"
+                )
+                
+            # Store signature and remove it from data for verification
+            stored_signature = data.get('signature')
+            hashes_data = data.get('hashes', {})
+                
+            # Recompute the expected signature (same method as save_manifest)
+            manifest_str = json.dumps(hashes_data, sort_keys=True)
+            expected_signature = hmac.new(
+                sign_key.encode(), manifest_str.encode(), hashlib.sha256
+            ).hexdigest()
+                
+            # Constant-time comparison to prevent timing attacks
+            if not hmac.compare_digest(stored_signature, expected_signature):
+                logger.critical(
+                    "MANIFEST SIGNATURE INVALID — possible tampering detected"
+                )
+                raise SecurityError("Manifest signature verification failed")
+
+            logger.info("Manifest signature verified successfully")
+            self._signature = stored_signature
+        else:
+            # No sign_key: load without verification (backward compatibility)
+            self._signature = data.get('signature')
+            logger.debug(
+                "Manifest loaded without signature verification "
+                "(no sign_key provided)"
+            )
+            
+        self._hashes = data.get('hashes', {})
+        return data
     
     def save_manifest(self, sign_key: str = None):
         """Save manifest to file"""
@@ -205,9 +268,27 @@ def _compute_critical_hashes() -> dict:
     return hashes
 
 
-# These hashes are computed at import time for runtime tamper detection.
-# For distribution-level integrity, freeze hashes during CI/CD build.
-EMBEDDED_CRITICAL_HASHES = _compute_critical_hashes()
+# Prefer build-time frozen hashes over runtime-computed hashes for security.
+# Runtime-computed hashes are vulnerable to "living off the land" attacks
+# where an attacker modifies files before import to bake in tampered hashes.
+try:
+    from ._frozen_hashes import FROZEN_HASHES
+    EMBEDDED_CRITICAL_HASHES = FROZEN_HASHES
+    _HASHES_FROZEN = True
+except ImportError:
+    try:
+        from _frozen_hashes import FROZEN_HASHES
+        EMBEDDED_CRITICAL_HASHES = FROZEN_HASHES
+        _HASHES_FROZEN = True
+    except ImportError:
+        # Fallback: compute at runtime (development mode — NOT tamper-proof)
+        EMBEDDED_CRITICAL_HASHES = _compute_critical_hashes()
+        _HASHES_FROZEN = False
+        import logging
+        logging.getLogger(__name__).warning(
+            "Using runtime-computed hashes (development mode). "
+            "Run freeze_hashes.py before release for tamper protection."
+        )
 
 
 # =============================================================================
@@ -752,20 +833,39 @@ def verify_self() -> bool:
     Verify this module hasn't been tampered with.
     
     This function verifies the bypass_protection module itself,
-    providing bootstrapped security.
-    """
-    # Get this module's file
-    this_file = Path(__file__)
+    providing bootstrapped security by comparing current file hashes
+    against the frozen or embedded expected hashes.
     
-    if not this_file.exists():
+    Returns:
+        True if all critical files match expected hashes, False otherwise.
+    """
+    if not EMBEDDED_CRITICAL_HASHES:
+        logger.warning("No embedded hashes available — cannot verify integrity")
+        return False  # Fail-closed: no hashes = not verified
+    
+    current_hashes = _compute_critical_hashes()
+    mismatches = []
+    
+    for fname, expected_hash in EMBEDDED_CRITICAL_HASHES.items():
+        current = current_hashes.get(fname)
+        if current is None:
+            mismatches.append(f"{fname}: file missing")
+        elif current != expected_hash:
+            mismatches.append(f"{fname}: hash mismatch")
+    
+    if mismatches:
+        logger.critical(
+            f"INTEGRITY VIOLATION: {len(mismatches)} file(s) tampered: {mismatches}"
+        )
         return False
     
-    # In production, this hash would be embedded at build time
-    # and verified against the actual file
-    actual_hash = HashManifest.compute_file_hash(str(this_file))
-    
-    # Log hash for debugging (in production, compare to expected)
-    logger.debug(f"Self-verification hash: {actual_hash[:32]}...")
+    if _HASHES_FROZEN:
+        logger.info(
+            f"Integrity verified: {len(EMBEDDED_CRITICAL_HASHES)} files "
+            "match frozen hashes"
+        )
+    else:
+        logger.info("Integrity check passed (runtime hashes — dev mode)")
     
     return True
 

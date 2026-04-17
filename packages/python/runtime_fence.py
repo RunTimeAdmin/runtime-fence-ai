@@ -25,6 +25,43 @@ except ImportError:
     except ImportError:
         FAIL_MODE_AVAILABLE = False
 
+# Behavioral thresholds integration
+try:
+    from .behavioral_thresholds import (
+        BehavioralThresholds, ExfiltrationDetector
+    )
+    BEHAVIORAL_AVAILABLE = True
+except ImportError:
+    try:
+        from behavioral_thresholds import (
+            BehavioralThresholds, ExfiltrationDetector
+        )
+        BEHAVIORAL_AVAILABLE = True
+    except ImportError:
+        BEHAVIORAL_AVAILABLE = False
+
+# Intent analyzer integration
+try:
+    from .intent_analyzer import IntentAnalyzer
+    INTENT_AVAILABLE = True
+except ImportError:
+    try:
+        from intent_analyzer import IntentAnalyzer
+        INTENT_AVAILABLE = True
+    except ImportError:
+        INTENT_AVAILABLE = False
+
+# Sliding window detector integration
+try:
+    from .sliding_window import SlidingWindowDetector
+    SLIDING_WINDOW_AVAILABLE = True
+except ImportError:
+    try:
+        from sliding_window import SlidingWindowDetector
+        SLIDING_WINDOW_AVAILABLE = True
+    except ImportError:
+        SLIDING_WINDOW_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("runtime_fence")
 
@@ -51,6 +88,11 @@ class FenceConfig:
     offline_mode: bool = False  # Skip API calls, local validation only
     reset_token: str = ""  # Optional token required for reset() authorization
     fail_mode: str = "closed"  # "closed", "cached", or "open"
+    # Security module toggles
+    enable_behavioral: bool = True
+    # Off by default (requires LLM API key)
+    enable_intent_analysis: bool = False
+    enable_sliding_window: bool = True
 
 
 @dataclass
@@ -93,7 +135,44 @@ class RuntimeFence:
         else:
             self._fail_handler = None
 
-    def validate(self, action: str, target: str, amount: float = 0.0, context: Dict = None) -> ActionResult:
+        # Initialize security modules
+        self._behavioral = None
+        self._exfiltration = None
+        self._intent_analyzer = None
+        self._sliding_window = None
+
+        if self.config.enable_behavioral and BEHAVIORAL_AVAILABLE:
+            try:
+                self._behavioral = BehavioralThresholds()
+                self._exfiltration = ExfiltrationDetector()
+                logger.info("Behavioral thresholds module loaded")
+            except Exception as e:
+                logger.warning(f"Behavioral thresholds unavailable: {e}")
+
+        if self.config.enable_intent_analysis and INTENT_AVAILABLE:
+            try:
+                # Local-only by default
+                self._intent_analyzer = IntentAnalyzer(use_llm=False)
+                logger.info("Intent analyzer module loaded")
+            except Exception as e:
+                logger.warning(f"Intent analyzer unavailable: {e}")
+
+        if self.config.enable_sliding_window and SLIDING_WINDOW_AVAILABLE:
+            try:
+                self._sliding_window = SlidingWindowDetector(
+                    agent_id=self.config.agent_id
+                )
+                logger.info("Sliding window detector loaded")
+            except Exception as e:
+                logger.warning(f"Sliding window unavailable: {e}")
+
+    def validate(
+        self,
+        action: str,
+        target: str,
+        amount: float = 0.0,
+        context: Dict = None
+    ) -> ActionResult:
         """
         Validate an action before allowing it through the fence.
         Returns ActionResult with allowed=True/False.
@@ -149,23 +228,119 @@ class RuntimeFence:
                 
                 if self._fail_handler:
                     # Use fail_mode strategy
-                    allowed_result, reason, fm_risk = self._fail_handler.on_validation_failure(action, target, e)
+                    result = self._fail_handler.on_validation_failure(
+                        action, target, e
+                    )
+                    allowed_result, reason, fm_risk = result
                     if not allowed_result:
-                        logger.critical("FAIL-CLOSED: API unavailable, blocking action")
+                        log_msg = "FAIL-CLOSED: API unavailable, blocking"
+                        logger.critical(log_msg)
                         risk_score = 100  # Block the action
                         reasons.append(reason)
                     else:
                         # CACHED or OPEN mode
                         if fm_risk > 0:
-                            logger.warning(f"FAIL-CACHED: Using cached policy")
+                            logger.warning("FAIL-CACHED: Using cached policy")
                             risk_score = max(risk_score, int(fm_risk))
                         else:
-                            logger.warning("FAIL-OPEN: API unavailable, allowing with local-only validation")
+                            log_msg = (
+                                "FAIL-OPEN: API unavailable, "
+                                "allowing with local-only validation"
+                            )
+                            logger.warning(log_msg)
                 else:
-                    # No fail_mode available — original behavior (local-only)
-                    logger.warning("Using local-only validation (fail_mode not available)")
+                    # No fail_mode available — original behavior
+                    log_msg = "Using local-only validation (no fail_mode)"
+                    logger.warning(log_msg)
 
-        # Determine risk level
+        # --- Security module checks ---
+        agent_id = self.config.agent_id
+
+        # Behavioral thresholds check
+        if self._behavioral:
+            try:
+                allowed_bt, breach = self._behavioral.check_action(
+                    agent_id=agent_id,
+                    action_type=action,
+                    target=target
+                )
+                if not allowed_bt and breach:
+                    log_msg = f"Behavioral threshold breach: {breach}"
+                    logger.warning(log_msg)
+                    risk_score = max(risk_score, 90)
+                    reasons.append(f"Behavioral: {breach.threshold_name}")
+            except Exception as e:
+                logger.warning(f"Behavioral check failed: {e}")
+
+        # Exfiltration detection
+        if self._exfiltration:
+            try:
+                # Estimate bytes from context or use 0
+                est_bytes = 0
+                if context and isinstance(context, dict):
+                    est_bytes = context.get("bytes_accessed", 0)
+                is_exfil, exfil_reason = self._exfiltration.record_data_access(
+                    agent_id=agent_id,
+                    target=target,
+                    bytes_accessed=est_bytes
+                )
+                if is_exfil:
+                    logger.warning(f"Exfiltration detected: {exfil_reason}")
+                    risk_score = max(risk_score, 95)
+                    reasons.append(f"Exfiltration: {exfil_reason}")
+                else:
+                    # Check unique target count
+                    stats = self._exfiltration.get_agent_data_stats(
+                        agent_id
+                    )
+                    if stats.get('unique_targets', 0) > 50:
+                        n = stats['unique_targets']
+                        msg = f"Potential exfil: {n} unique targets"
+                        logger.warning(msg)
+                        risk_score = max(risk_score, 85)
+                        reasons.append(msg)
+            except Exception as e:
+                logger.warning(f"Exfiltration check failed: {e}")
+
+        # Intent analysis (if enabled and available)
+        if self._intent_analyzer:
+            try:
+                code_snippet = ""
+                if context and isinstance(context, dict):
+                    code_snippet = context.get("code", "")
+                if code_snippet:
+                    intent_result = self._intent_analyzer.analyze(code_snippet)
+                    risk_score = max(risk_score, intent_result.risk_score)
+                    if intent_result.risk_score >= 70:
+                        reasons.append(
+                            f"Intent: {intent_result.intent.value} "
+                            f"({intent_result.risk_score})"
+                        )
+            except Exception as e:
+                logger.warning(f"Intent analysis failed: {e}")
+
+        # Sliding window (low-and-slow detection)
+        if self._sliding_window:
+            try:
+                # Record this action
+                self._sliding_window.record_api_call(1)
+                if amount > 0:
+                    self._sliding_window.record_bytes_out(int(amount))
+
+                # Check for threshold breaches
+                breaches = self._sliding_window.check_thresholds()
+                if breaches:
+                    for b in breaches:
+                        logger.warning(
+                            f"Sliding window breach: {b.metric.value} "
+                            f"= {b.current_value:.0f}"
+                        )
+                        risk_score = max(risk_score, 80)
+                        reasons.append(f"Window breach: {b.metric.value}")
+            except Exception as e:
+                logger.warning(f"Sliding window check failed: {e}")
+
+        # Determine risk level (clamp AFTER security module checks)
         risk_score = min(risk_score, 100)  # Clamp to valid range
         if risk_score >= 90:
             risk_level = RiskLevel.CRITICAL
