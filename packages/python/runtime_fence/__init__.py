@@ -104,6 +104,12 @@ from .governance_separation import (
     MockVoteProvider,
 )
 
+# SPIFFE/SPIRE integration (optional)
+try:
+    from .spiffe import SpiffeIdentityManager, SpiffeConfig
+except ImportError:
+    pass
+
 __version__ = "1.1.0"
 
 __all__ = [
@@ -197,6 +203,9 @@ __all__ = [
     "ActionType",
     "VoteProvider",
     "MockVoteProvider",
+    # SPIFFE/SPIRE
+    "SpiffeIdentityManager",
+    "SpiffeConfig",
     # Version
     "__version__",
 ]

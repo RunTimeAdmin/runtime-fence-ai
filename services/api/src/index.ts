@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import jwt from 'jsonwebtoken';
+import { WebSocketServer, WebSocket } from 'ws';
 import { KillSwitch, AgentConfig, TransactionRequest } from '@killswitch/core';
 import {
   authMiddleware,
@@ -19,9 +20,107 @@ import {
   revokeToken
 } from './auth';
 import { supabase, isSupabaseConfigured } from './db';
+import { verifyAuditChain } from './audit-logging';
 
 const app = express();
 const killSwitch = new KillSwitch();
+
+// ============================================
+// WebSocket Server for Distributed Kill Propagation
+// ============================================
+
+// Track connected SDK clients by agent_id
+const agentConnections = new Map<string, Set<WebSocket>>();
+
+/**
+ * Propagate kill command to all connected SDK instances.
+ * @param agentId - Target agent ID, or null for global kill
+ * @param reason - Kill reason for audit trail
+ * @param triggeredBy - User/system that triggered the kill
+ */
+function propagateKill(agentId: string | null, reason: string, triggeredBy: string) {
+  const killMessage = JSON.stringify({
+    type: 'kill',
+    agent_id: agentId,
+    reason,
+    triggered_by: triggeredBy,
+    timestamp: Date.now(),
+    global: agentId === null,
+  });
+
+  if (agentId === null) {
+    // Global kill — notify ALL connected clients
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(killMessage);
+      }
+    });
+    console.log(`WebSocket: Global kill propagated to ${wss.clients.size} clients`);
+  } else {
+    // Targeted kill — notify only instances of this agent
+    const connections = agentConnections.get(agentId);
+    if (connections) {
+      connections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(killMessage);
+        }
+      });
+      console.log(`WebSocket: Kill propagated to ${connections.size} instances of agent ${agentId}`);
+    }
+  }
+}
+
+/**
+ * Initialize WebSocket server for SDK client connections.
+ * @param server - HTTP server to attach WebSocket server to
+ */
+function initializeWebSocketServer(server: any) {
+  const wss = new WebSocketServer({ server });
+
+  wss.on('connection', (ws: WebSocket, req) => {
+    let agentId: string | null = null;
+
+    ws.on('message', (data: string) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'register' && msg.agent_id) {
+          // SDK client registers which agent_id it's wrapping
+          agentId = msg.agent_id as string;
+          if (!agentConnections.has(agentId)) {
+            agentConnections.set(agentId, new Set());
+          }
+          agentConnections.get(agentId)!.add(ws);
+          ws.send(JSON.stringify({ type: 'registered', agent_id: agentId }));
+          console.log(`WebSocket: Agent ${agentId} connected (${agentConnections.get(agentId)!.size} instances)`);
+        }
+
+        if (msg.type === 'ack_kill') {
+          // SDK confirms it received and applied the kill
+          console.log(`WebSocket: Kill acknowledged by instance for agent ${msg.agent_id}`);
+        }
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
+      }
+    });
+
+    ws.on('close', () => {
+      if (agentId && agentConnections.has(agentId)) {
+        agentConnections.get(agentId)!.delete(ws);
+        if (agentConnections.get(agentId)!.size === 0) {
+          agentConnections.delete(agentId);
+        }
+        console.log(`WebSocket: Agent ${agentId} disconnected`);
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.error('WebSocket error:', err);
+    });
+  });
+
+  return wss;
+}
 
 app.use(helmet());
 app.use(cors());
@@ -203,6 +302,9 @@ app.post('/api/v1/killswitch/trigger', authMiddleware, async (req: Request, res:
     });
   }
 
+  // Propagate kill to all connected SDK instances
+  propagateKill(agentId || null, reason || 'Manual kill switch', req.user?.id || 'system');
+
   res.json({ success: true, triggered: true });
 });
 
@@ -300,6 +402,9 @@ app.post('/api/runtime/kill', authMiddleware, async (req: Request, res: Response
       created_at: Date.now()
     });
   }
+
+  // Propagate kill to all connected SDK instances
+  propagateKill(agentId || null, reason || 'Emergency kill', userId || 'system');
 
   res.json({
     success: true,
@@ -414,10 +519,26 @@ app.get('/api/audit/status/:id', authMiddleware, async (req: Request, res: Respo
   res.json(audit);
 });
 
+// Verify audit log chain integrity
+app.get('/api/audit/verify', authMiddleware, async (req: Request, res: Response) => {
+  if (isSupabaseConfigured()) {
+    const { data } = await supabase
+      .from('audit_logs')
+      .select('*')
+      .order('created_at', { ascending: true })
+      .limit(1000);
+
+    const result = verifyAuditChain(data || []);
+    res.json({ ...result, entries_checked: data?.length || 0 });
+  } else {
+    res.json({ valid: true, message: 'Audit logging not configured' });
+  }
+});
+
 app.get('/api/audit/list', authMiddleware, async (req: Request, res: Response) => {
   const requesterId = req.user?.id;
   const isAdmin = req.user?.role === 'admin';
-  
+
   if (isSupabaseConfigured()) {
     let query = supabase
       .from('audit_requests')
@@ -485,9 +606,19 @@ async function restoreKillState() {
 
 const PORT = process.env.PORT || 3001;
 
+// WebSocket server instance (initialized after HTTP server starts)
+let wss: WebSocketServer;
+
 // Restore kill state before starting server
-restoreKillState().then(() => {
-  app.listen(PORT, () => console.log('API running on port ' + PORT));
-});
+// Only start the server if we're not in a test environment
+if (process.env.NODE_ENV !== 'test') {
+  restoreKillState().then(() => {
+    const server = app.listen(PORT, () => console.log('API running on port ' + PORT));
+    
+    // Initialize WebSocket server on the same port
+    wss = initializeWebSocketServer(server);
+    console.log('WebSocket server initialized for distributed kill propagation');
+  });
+}
 
 export default app;

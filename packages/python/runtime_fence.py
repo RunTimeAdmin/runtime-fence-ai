@@ -8,11 +8,32 @@ import json
 import time
 import logging
 import inspect
+import threading
 import requests
 from typing import Any, Callable, Dict, Optional
 from functools import wraps
 from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict
+
+
+class _RateLimiter:
+    """Simple token-bucket rate limiter for validate() calls."""
+    def __init__(self, max_per_second: int = 100):
+        self._max = max_per_second
+        self._counts: dict = defaultdict(list)  # agent_id -> [timestamps]
+
+    def allow(self, agent_id: str) -> bool:
+        now = time.time()
+        # Prune old entries
+        self._counts[agent_id] = [
+            t for t in self._counts[agent_id] if now - t < 1.0
+        ]
+        if len(self._counts[agent_id]) >= self._max:
+            return False
+        self._counts[agent_id].append(now)
+        return True
+
 
 # Fail-mode integration
 try:
@@ -73,6 +94,118 @@ class RiskLevel(Enum):
     CRITICAL = "critical"
 
 
+class KillPropagationClient:
+    """WebSocket client for receiving distributed kill signals."""
+
+    def __init__(
+        self,
+        api_url: str,
+        agent_id: str,
+        on_kill_callback: Callable[[str], None]
+    ):
+        """
+        Initialize the kill propagation client.
+
+        Args:
+            api_url: Base URL of the Runtime Fence API
+            agent_id: Unique identifier for this agent instance
+            on_kill_callback: Function called when kill signal received
+        """
+        self._ws_url = api_url.replace(
+            'http://', 'ws://'
+        ).replace('https://', 'wss://')
+        self._agent_id = agent_id
+        self._on_kill = on_kill_callback
+        self._ws = None
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """Start the WebSocket listener in a background thread."""
+        self._running = True
+        self._thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self._thread.start()
+
+    def _listen_loop(self) -> None:
+        """Reconnecting WebSocket listener with exponential backoff."""
+        try:
+            import websocket  # websocket-client package
+        except ImportError:
+            logger.warning(
+                "websocket-client not installed — kill propagation disabled. "
+                "Install with: pip install websocket-client"
+            )
+            return
+
+        reconnect_delay = 5  # Start with 5 seconds
+        max_reconnect_delay = 60  # Cap at 60 seconds
+
+        while self._running:
+            try:
+                self._ws = websocket.WebSocketApp(
+                    self._ws_url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                logger.warning(f"WebSocket connection failed: {e}")
+
+            if self._running:
+                logger.info(f"Reconnecting in {reconnect_delay} seconds...")
+                time.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
+    def _on_open(self, ws) -> None:
+        """Register this agent instance with the server."""
+        ws.send(json.dumps({
+            'type': 'register',
+            'agent_id': self._agent_id,
+        }))
+        logger.info(
+            f"WebSocket: Registered agent {self._agent_id}"
+        )
+
+    def _on_message(self, ws, message: str) -> None:
+        """Handle incoming WebSocket messages."""
+        try:
+            msg = json.loads(message)
+            if msg.get('type') == 'kill':
+                target = msg.get('agent_id')
+                # Accept if global kill (target=None) or targeted at this agent
+                if target is None or target == self._agent_id:
+                    reason = msg.get('reason', 'Remote kill')
+                    logger.critical(f"REMOTE KILL RECEIVED: {reason}")
+                    self._on_kill(reason)
+                    # Acknowledge receipt
+                    ws.send(json.dumps({
+                        'type': 'ack_kill',
+                        'agent_id': self._agent_id,
+                    }))
+            elif msg.get('type') == 'registered':
+                logger.info("WebSocket: Server confirmed registration")
+        except json.JSONDecodeError:
+            logger.warning(f"WebSocket: Received invalid JSON: {message}")
+        except Exception as e:
+            logger.warning(f"WebSocket: Error handling message: {e}")
+
+    def _on_error(self, ws, error) -> None:
+        """Handle WebSocket errors."""
+        logger.debug(f"WebSocket error: {error}")
+
+    def _on_close(self, ws, close_status_code: int, close_msg: str) -> None:
+        """Handle WebSocket connection close."""
+        logger.debug(f"WebSocket closed: {close_status_code} - {close_msg}")
+
+    def stop(self) -> None:
+        """Stop the WebSocket listener."""
+        self._running = False
+        if self._ws:
+            self._ws.close()
+
+
 @dataclass
 class FenceConfig:
     """Configuration for the Runtime Fence wrapper."""
@@ -93,6 +226,10 @@ class FenceConfig:
     # Off by default (requires LLM API key)
     enable_intent_analysis: bool = False
     enable_sliding_window: bool = True
+    # SPIFFE/SPIRE identity configuration
+    spiffe_enabled: bool = False
+    spiffe_workload_api: str = ""
+    spiffe_trust_domain: str = "runtime-fence.local"
 
 
 @dataclass
@@ -166,17 +303,88 @@ class RuntimeFence:
             except Exception as e:
                 logger.warning(f"Sliding window unavailable: {e}")
 
+        # Initialize SPIFFE identity manager if enabled
+        self._spiffe = None
+        if self.config.spiffe_enabled:
+            try:
+                from .spiffe import SpiffeIdentityManager, SpiffeConfig
+                spiffe_config = SpiffeConfig(
+                    enabled=True,
+                    workload_api_addr=self.config.spiffe_workload_api,
+                    trust_domain=self.config.spiffe_trust_domain,
+                )
+                self._spiffe = SpiffeIdentityManager(spiffe_config)
+                logger.info("SPIFFE identity manager loaded")
+            except Exception as e:
+                logger.warning(f"SPIFFE integration unavailable: {e}")
+                self._spiffe = None
+
+        # Pre-load sentence-transformers model asynchronously
+        if self.config.enable_sliding_window or self.config.enable_behavioral:
+            try:
+                from .task_adherence import (
+                    _get_sentence_model, SENTENCE_TRANSFORMERS_AVAILABLE
+                )
+                if SENTENCE_TRANSFORMERS_AVAILABLE:
+                    import threading
+                    threading.Thread(
+                        target=_get_sentence_model,
+                        daemon=True,
+                        name="sentence-model-preload"
+                    ).start()
+                    logger.debug(
+                        "Sentence-transformers model preloading in background"
+                    )
+            except ImportError:
+                pass
+
+        # Initialize rate limiter
+        self._rate_limiter = _RateLimiter(max_per_second=100)
+
+        # Start kill propagation listener for distributed kills
+        self._kill_propagation: Optional[KillPropagationClient] = None
+        if self.config.api_url and not self.config.offline_mode:
+            try:
+                self._kill_propagation = KillPropagationClient(
+                    api_url=self.config.api_url,
+                    agent_id=self.config.agent_id,
+                    on_kill_callback=self._remote_kill_received,
+                )
+                self._kill_propagation.start()
+            except Exception as e:
+                logger.warning(f"Failed to start kill propagation: {e}")
+
+    def _remote_kill_received(self, reason: str) -> None:
+        """Handle kill signal received from remote server."""
+        logger.critical(f"REMOTE KILL APPLIED: {reason}")
+        self.killed = True
+
     def validate(
         self,
         action: str,
         target: str,
         amount: float = 0.0,
-        context: Dict = None
+        context: Dict = None,
+        metadata: Dict = None
     ) -> ActionResult:
         """
         Validate an action before allowing it through the fence.
         Returns ActionResult with allowed=True/False.
         """
+        # Rate limiting check
+        agent_id = (metadata or {}).get("agent_id", self.config.agent_id)
+        if not self._rate_limiter.allow(agent_id):
+            logger.warning(f"Rate limit exceeded for agent {agent_id}")
+            return ActionResult(
+                allowed=False,
+                action=action,
+                target=target,
+                risk_score=100,
+                risk_level=RiskLevel.CRITICAL,
+                reasons=["Rate limit exceeded"],
+                timestamp=time.time()
+            )
+
         if self.killed:
             return ActionResult(
                 allowed=False,

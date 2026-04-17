@@ -55,8 +55,14 @@ alerts = [
 embeddings = [
     "sentence-transformers>=2.0.0"
 ]
+spiffe = [
+    "py-spiffe>=0.7.0"
+]
+distributed = [
+    "websocket-client>=1.0.0"
+]
 all = [
-    "runtime-fence[dev,alerts,embeddings]"
+    "runtime-fence[dev,alerts,embeddings,spiffe,distributed]"
 ]
 
 [project.urls]

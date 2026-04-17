@@ -1,7 +1,122 @@
 import { Request, Response, Router, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { supabase, isSupabaseConfigured } from './db';
+
+// Hash chain state for immutable audit logs
+let previousHash: string = 'GENESIS';
+
+// Audit entry interface for hash chaining
+interface AuditEntry {
+  action: string;
+  agent_id: string;
+  user_id: string;
+  risk_score: number;
+  allowed: boolean;
+  metadata?: Record<string, any>;
+  timestamp: number;
+}
+
+/**
+ * Compute SHA-256 hash for an audit entry including previous hash
+ */
+function computeEntryHash(entry: AuditEntry, prevHash: string): string {
+  const data = JSON.stringify({
+    ...entry,
+    previous_hash: prevHash,
+  });
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Log an audit entry with hash chaining for immutability
+ */
+export async function logAuditEntry(entry: AuditEntry): Promise<string> {
+  const entryHash = computeEntryHash(entry, previousHash);
+
+  const record = {
+    ...entry,
+    previous_hash: previousHash,
+    entry_hash: entryHash,
+    created_at: Date.now(),
+  };
+
+  if (isSupabaseConfigured()) {
+    await supabase.from('audit_logs').insert(record);
+  }
+
+  // Update the chain state
+  previousHash = entryHash;
+
+  return entryHash;
+}
+
+/**
+ * Verify the integrity of an audit log chain
+ */
+export function verifyAuditChain(entries: any[]): { valid: boolean; broken_at?: number } {
+  let prevHash = 'GENESIS';
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.previous_hash !== prevHash) {
+      return { valid: false, broken_at: i };
+    }
+
+    const expectedHash = computeEntryHash({
+      action: entry.action,
+      agent_id: entry.agent_id,
+      user_id: entry.user_id,
+      risk_score: entry.risk_score,
+      allowed: entry.allowed,
+      metadata: entry.metadata,
+      timestamp: entry.timestamp,
+    }, prevHash);
+
+    if (entry.entry_hash !== expectedHash) {
+      return { valid: false, broken_at: i };
+    }
+
+    prevHash = entry.entry_hash;
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Export audit logs to S3 (optional - only if AWS SDK is available)
+ */
+export async function exportAuditToS3(
+  entries: any[],
+  bucket: string,
+  key: string
+): Promise<boolean> {
+  // Only if AWS SDK is available
+  try {
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const client = new S3Client({});
+
+    const payload = JSON.stringify({
+      exported_at: new Date().toISOString(),
+      entry_count: entries.length,
+      chain_valid: verifyAuditChain(entries).valid,
+      entries,
+    });
+
+    await client.send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: payload,
+      ContentType: 'application/json',
+    }));
+
+    return true;
+  } catch (e) {
+    console.error('S3 export failed:', e);
+    return false;
+  }
+}
 
 const router = Router();
 
