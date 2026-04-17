@@ -1,1 +1,10 @@
 @import "tailwindcss";
+
+@keyframes pulse-once {
+  0% { background-color: rgba(59, 130, 246, 0.1); }
+  100% { background-color: transparent; }
+}
+
+.animate-pulse-once {
+  animation: pulse-once 1s ease-out;
+}

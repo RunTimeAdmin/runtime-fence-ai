@@ -187,6 +187,7 @@ export default function AgentsPage() {
           </h1>
           <div className="flex gap-4">
             <a href="/" className="text-gray-400 hover:text-white">← Home</a>
+            <a href="/dashboard/live" className="text-gray-400 hover:text-white">Live Activity</a>
             <a href="/governance" className="text-gray-400 hover:text-white">Governance</a>
           </div>
         </div>

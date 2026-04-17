@@ -32,6 +32,34 @@ const killSwitch = new KillSwitch();
 // Track connected SDK clients by agent_id
 const agentConnections = new Map<string, Set<WebSocket>>();
 
+// Activity event broadcasting
+interface ActivityEvent {
+  type: 'activity';
+  agent_id: string;
+  action: string;
+  target: string;
+  risk_score: number;
+  risk_level: string;
+  allowed: boolean;
+  timestamp: number;
+}
+
+// Track dashboard viewers (separate from SDK clients)
+const dashboardClients = new Set<WebSocket>();
+
+/**
+ * Broadcast activity event to all connected dashboard clients.
+ * @param event - The activity event to broadcast
+ */
+function broadcastActivity(event: ActivityEvent) {
+  const message = JSON.stringify(event);
+  dashboardClients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+    }
+  });
+}
+
 /**
  * Propagate kill command to all connected SDK instances.
  * @param agentId - Target agent ID, or null for global kill
@@ -46,6 +74,11 @@ function propagateKill(agentId: string | null, reason: string, triggeredBy: stri
     triggered_by: triggeredBy,
     timestamp: Date.now(),
     global: agentId === null,
+    risk_score: 100,
+    risk_level: 'CRITICAL',
+    allowed: false,
+    action: 'KILL',
+    target: reason,
   });
 
   if (agentId === null) {
@@ -68,6 +101,13 @@ function propagateKill(agentId: string | null, reason: string, triggeredBy: stri
       console.log(`WebSocket: Kill propagated to ${connections.size} instances of agent ${agentId}`);
     }
   }
+
+  // Also broadcast to dashboard clients for real-time monitoring
+  dashboardClients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(killMessage);
+    }
+  });
 }
 
 /**
@@ -79,6 +119,7 @@ function initializeWebSocketServer(server: any) {
 
   wss.on('connection', (ws: WebSocket, req) => {
     let agentId: string | null = null;
+    let isDashboard = false;
 
     ws.on('message', (data: string) => {
       try {
@@ -93,6 +134,14 @@ function initializeWebSocketServer(server: any) {
           agentConnections.get(agentId)!.add(ws);
           ws.send(JSON.stringify({ type: 'registered', agent_id: agentId }));
           console.log(`WebSocket: Agent ${agentId} connected (${agentConnections.get(agentId)!.size} instances)`);
+        }
+
+        if (msg.type === 'dashboard') {
+          // Dashboard client registration
+          isDashboard = true;
+          dashboardClients.add(ws);
+          ws.send(JSON.stringify({ type: 'dashboard_connected' }));
+          console.log(`WebSocket: Dashboard client connected (${dashboardClients.size} total)`);
         }
 
         if (msg.type === 'ack_kill') {
@@ -111,6 +160,10 @@ function initializeWebSocketServer(server: any) {
           agentConnections.delete(agentId);
         }
         console.log(`WebSocket: Agent ${agentId} disconnected`);
+      }
+      if (isDashboard) {
+        dashboardClients.delete(ws);
+        console.log(`WebSocket: Dashboard client disconnected (${dashboardClients.size} remaining)`);
       }
     });
 
@@ -283,6 +336,19 @@ app.post('/api/v1/agents', authMiddleware, (req: Request, res: Response) => {
 app.post('/api/v1/validate', authMiddleware, async (req: Request, res: Response) => {
   const tx: TransactionRequest = req.body;
   const result = await killSwitch.validate(tx);
+  
+  // Broadcast activity to dashboard clients
+  broadcastActivity({
+    type: 'activity',
+    agent_id: req.body.agentId || req.body.agent_id || 'unknown',
+    action: req.body.action || 'validate',
+    target: req.body.target || '',
+    risk_score: result.riskScore || 0,
+    risk_level: result.riskLevel || 'LOW',
+    allowed: result.allowed ?? true,
+    timestamp: Date.now(),
+  });
+  
   res.json(result);
 });
 
@@ -356,6 +422,19 @@ app.post('/api/runtime/assess', authMiddleware, agentAuth, async (req: Request, 
   const { agentId, action, context } = req.body;
   const tx = { agentId, action, target: context?.target || 'unknown', timestamp: Date.now() };
   const result = await killSwitch.validate(tx);
+  
+  // Broadcast activity to dashboard clients
+  broadcastActivity({
+    type: 'activity',
+    agent_id: agentId || 'unknown',
+    action: action || 'assess',
+    target: context?.target || '',
+    risk_score: result.riskScore || 0,
+    risk_level: result.riskLevel || 'LOW',
+    allowed: result.allowed ?? true,
+    timestamp: Date.now(),
+  });
+  
   res.json({
     agentId,
     riskScore: result.riskScore,
