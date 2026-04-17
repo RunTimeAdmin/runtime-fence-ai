@@ -34,6 +34,34 @@ Runtime Fence is a comprehensive safety ecosystem for ALL AI agents. Whether it'
 - **🛡️ Offline Mode** - Works without external dependencies
 - **🎯 Risk Scoring** - Automatic threat assessment (0-100)
 
+### Production Tamper Detection
+
+Runtime Fence includes SHA-256 hash verification of all critical security modules. For production deployments, freeze hashes at build time:
+
+```bash
+cd packages/python
+python freeze_hashes.py > runtime_fence/_frozen_hashes.py
+```
+
+This generates `_frozen_hashes.py` containing SHA-256 hashes of all 9 security modules. At runtime, `bypass_protection.py` compares live file hashes against frozen values — any mismatch triggers a tamper alert.
+
+**CI/CD Integration:**
+
+Add to your build pipeline (after tests pass, before packaging):
+
+```yaml
+# GitHub Actions example
+- name: Freeze security hashes
+  run: |
+    cd packages/python
+    python freeze_hashes.py > runtime_fence/_frozen_hashes.py
+    
+- name: Verify frozen hashes
+  run: python -c "from runtime_fence._frozen_hashes import FROZEN_HASHES; print(f'{len(FROZEN_HASHES)} modules frozen')"
+```
+
+> **Important:** Re-run `freeze_hashes.py` after any change to security modules. Without frozen hashes, tamper detection falls back to runtime-computed hashes with a warning log.
+
 ---
 
 ## 📦 Quick Start
