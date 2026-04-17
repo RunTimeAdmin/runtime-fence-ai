@@ -319,16 +319,19 @@ class MacOSFirewall(FirewallInterface):
     macOS firewall implementation using pf (packet filter).
     
     Note: Requires root privileges and pf to be enabled.
+    Uses per-user rules to block only specific user's traffic,
+    not global blocking that affects the entire system.
     """
     
     TABLE_NAME = "killswitch_blocked"
-    ANCHOR_NAME = "com.killswitch"
+    ANCHOR_PREFIX = "com.killswitch."
     
     def __init__(self):
-        self._ensure_anchor_exists()
+        self._blocked_uids: Dict[str, int] = {}  # identifier -> uid
+        self._ensure_pf_enabled()
     
     def _run_pfctl(self, args: List[str]) -> Tuple[bool, str]:
-        """Run pfctl command"""
+        """Run pfctl command."""
         try:
             result = subprocess.run(
                 ["pfctl"] + args,
@@ -340,36 +343,114 @@ class MacOSFirewall(FirewallInterface):
         except Exception as e:
             return False, str(e)
     
-    def _ensure_anchor_exists(self):
-        """Ensure pf anchor exists"""
-        # This is simplified - in production would modify /etc/pf.conf
-        pass
+    def _ensure_pf_enabled(self):
+        """Ensure pf is enabled."""
+        self._run_pfctl(["-e"])
+    
+    def _get_process_uid(self, pid: str) -> Optional[int]:
+        """Get the UID of a process by PID."""
+        try:
+            import psutil
+            proc = psutil.Process(int(pid))
+            return proc.uids().real
+        except (psutil.NoSuchProcess, ValueError, psutil.AccessDenied):
+            return None
+    
+    def _get_pf_rules_for_user(self, uid: int) -> str:
+        """Generate per-user pf rules for macOS."""
+        return f"""# Runtime Fence - Agent Network Kill (UID: {uid})
+block drop out quick proto tcp from any to any user {uid}
+block drop out quick proto udp from any to any user {uid}
+"""
+    
+    def _get_anchor_name(self, uid: int) -> str:
+        """Get anchor name for a specific UID."""
+        return f"{self.ANCHOR_PREFIX}{uid}"
     
     def block_all_traffic(self, identifier: str) -> NetworkKillReport:
-        """Block all traffic (adds to blocked table)"""
-        # Add to blocked table
-        success, msg = self._run_pfctl([
-            "-t", self.TABLE_NAME, "-T", "add", "0.0.0.0/0"
-        ])
+        """Block all traffic for a specific user/agent using per-user rules."""
+        # Get the UID of the process being killed
+        uid = self._get_process_uid(identifier)
+        if uid is None:
+            # Fallback: try using identifier as UID directly
+            try:
+                uid = int(identifier)
+            except ValueError:
+                return NetworkKillReport(
+                    agent_id=identifier,
+                    result=NetworkKillResult.FAILED,
+                    platform="macos/pf",
+                    rules_applied=[],
+                    error=f"Could not resolve PID {identifier} to UID"
+                )
         
-        rules = []
-        if success:
-            rules.append(f"Added to {self.TABLE_NAME} table")
+        # Store the UID for this identifier
+        self._blocked_uids[identifier] = uid
         
-        return NetworkKillReport(
-            agent_id=identifier,
-            result=NetworkKillResult.SUCCESS if rules else NetworkKillResult.FAILED,
-            platform="macos/pf",
-            rules_applied=rules,
-            error=msg if not success else None
-        )
+        # Generate per-user pf rules
+        rules_content = self._get_pf_rules_for_user(uid)
+        anchor_name = self._get_anchor_name(uid)
+        
+        # Write rules to a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.conf', delete=False
+        ) as f:
+            f.write(rules_content)
+            rules_file = f.name
+        
+        try:
+            # Load rules into a named anchor
+            success, msg = self._run_pfctl([
+                "-a", anchor_name, "-f", rules_file
+            ])
+            
+            rules = []
+            if success:
+                rules.append(
+                    f"Blocked UID {uid} (from PID {identifier}) "
+                    f"via anchor {anchor_name}"
+                )
+                logger.info(
+                    f"Applied per-user pf rules for UID {uid} "
+                    f"in anchor {anchor_name}"
+                )
+            else:
+                # Fallback to table-based blocking for IP
+                success, msg = self._run_pfctl([
+                    "-t", self.TABLE_NAME, "-T", "add", "0.0.0.0/0"
+                ])
+                if success:
+                    rules.append(
+                        f"FALLBACK: Added 0.0.0.0/0 to {self.TABLE_NAME} table"
+                    )
+                    logger.warning(
+                        f"Fallback to global blocking for {identifier}"
+                    )
+            
+            result = (
+                NetworkKillResult.SUCCESS if rules else NetworkKillResult.FAILED
+            )
+            return NetworkKillReport(
+                agent_id=identifier,
+                result=result,
+                platform="macos/pf",
+                rules_applied=rules,
+                error=msg if not success else None
+            )
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(rules_file)
+            except OSError:
+                pass
     
     def block_outbound(self, identifier: str) -> NetworkKillReport:
-        """Block outbound traffic"""
+        """Block outbound traffic."""
         return self.block_all_traffic(identifier)
     
     def block_ip(self, ip_address: str) -> NetworkKillReport:
-        """Block specific IP"""
+        """Block specific IP."""
         success, msg = self._run_pfctl([
             "-t", self.TABLE_NAME, "-T", "add", ip_address
         ])
@@ -383,30 +464,75 @@ class MacOSFirewall(FirewallInterface):
         )
     
     def restore_access(self, identifier: str) -> NetworkKillReport:
-        """Restore access by flushing table"""
-        success, msg = self._run_pfctl([
+        """Restore access by removing per-user anchor rules."""
+        rules_removed = []
+        
+        # Check if we have a UID for this identifier
+        if identifier in self._blocked_uids:
+            uid = self._blocked_uids[identifier]
+            anchor_name = self._get_anchor_name(uid)
+            
+            # Remove the anchor rules
+            success, msg = self._run_pfctl([
+                "-a", anchor_name, "-F", "all"
+            ])
+            
+            if success:
+                rules_removed.append(
+                    f"Removed anchor {anchor_name} for UID {uid}"
+                )
+                logger.info(
+                    f"Removed per-user pf rules for UID {uid}"
+                )
+            
+            # Clean up
+            del self._blocked_uids[identifier]
+        
+        # Also try flushing table as fallback cleanup
+        success, _ = self._run_pfctl([
             "-t", self.TABLE_NAME, "-T", "flush"
         ])
+        if success:
+            rules_removed.append("Flushed blocked table")
         
+        result = (
+            NetworkKillResult.SUCCESS
+            if rules_removed else NetworkKillResult.NOT_BLOCKED
+        )
         return NetworkKillReport(
             agent_id=identifier,
-            result=NetworkKillResult.SUCCESS if success else NetworkKillResult.FAILED,
+            result=result,
             platform="macos/pf",
-            rules_applied=["Flushed blocked table"] if success else [],
-            error=msg if not success else None
+            rules_applied=rules_removed
         )
     
     def is_blocked(self, identifier: str) -> bool:
-        """Check if blocked"""
-        success, output = self._run_pfctl(["-t", self.TABLE_NAME, "-T", "show"])
-        return success and len(output.strip()) > 0
+        """Check if identifier is blocked."""
+        if identifier in self._blocked_uids:
+            uid = self._blocked_uids[identifier]
+            anchor_name = self._get_anchor_name(uid)
+            success, output = self._run_pfctl([
+                "-a", anchor_name, "-s", "rules"
+            ])
+            return success and len(output.strip()) > 0
+        return False
     
     def list_rules(self) -> List[str]:
-        """List blocked entries"""
-        success, output = self._run_pfctl(["-t", self.TABLE_NAME, "-T", "show"])
+        """List blocked entries."""
+        rules = []
+        # List all killswitch anchors
+        success, output = self._run_pfctl(["-s", "Anchors"])
         if success:
-            return output.strip().split('\n')
-        return []
+            for line in output.strip().split('\n'):
+                if self.ANCHOR_PREFIX in line:
+                    rules.append(line.strip())
+        # Also list table entries
+        success, output = self._run_pfctl([
+            "-t", self.TABLE_NAME, "-T", "show"
+        ])
+        if success and output.strip():
+            rules.extend(output.strip().split('\n'))
+        return rules
 
 
 # =============================================================================
@@ -463,9 +589,12 @@ class WindowsFirewall(FirewallInterface):
         if success2:
             rules.append(f"Block inbound: {rule_name}_IN")
         
+        result = (
+            NetworkKillResult.SUCCESS if rules else NetworkKillResult.FAILED
+        )
         return NetworkKillReport(
             agent_id=identifier,
-            result=NetworkKillResult.SUCCESS if rules else NetworkKillResult.FAILED,
+            result=result,
             platform="windows/netsh",
             rules_applied=rules,
             error=msg if not success else None
@@ -483,9 +612,12 @@ class WindowsFirewall(FirewallInterface):
             "enable=yes"
         ])
         
+        result = (
+            NetworkKillResult.SUCCESS if success else NetworkKillResult.FAILED
+        )
         return NetworkKillReport(
             agent_id=identifier,
-            result=NetworkKillResult.SUCCESS if success else NetworkKillResult.FAILED,
+            result=result,
             platform="windows/netsh",
             rules_applied=[f"Block outbound: {rule_name}"] if success else [],
             error=msg if not success else None
@@ -505,9 +637,12 @@ class WindowsFirewall(FirewallInterface):
             "enable=yes"
         ])
         
+        result = (
+            NetworkKillResult.SUCCESS if success else NetworkKillResult.FAILED
+        )
         return NetworkKillReport(
             agent_id=ip_address,
-            result=NetworkKillResult.SUCCESS if success else NetworkKillResult.FAILED,
+            result=result,
             platform="windows/netsh",
             rules_applied=[f"Block IP: {ip_address}"] if success else [],
             error=msg if not success else None
@@ -544,9 +679,13 @@ class WindowsFirewall(FirewallInterface):
         if success:
             rules_removed.append(f"Removed {rule_gen}")
         
+        result = (
+            NetworkKillResult.SUCCESS
+            if rules_removed else NetworkKillResult.NOT_BLOCKED
+        )
         return NetworkKillReport(
             agent_id=identifier,
-            result=NetworkKillResult.SUCCESS if rules_removed else NetworkKillResult.NOT_BLOCKED,
+            result=result,
             platform="windows/netsh",
             rules_applied=rules_removed
         )
@@ -590,6 +729,8 @@ class CloudFirewall:
     
     def __init__(self, provider: str = "aws"):
         self.provider = provider
+        # Store original security groups for restoration
+        self._original_sgs: Dict[str, List[str]] = {}
     
     def block_instance(self, instance_id: str) -> NetworkKillReport:
         """Block network access for a cloud instance"""
@@ -606,47 +747,75 @@ class CloudFirewall:
             )
     
     def _block_aws_instance(self, instance_id: str) -> NetworkKillReport:
-        """Block AWS EC2 instance network access"""
+        """Block AWS EC2 instance network access."""
         try:
             import boto3
             
             ec2 = boto3.client('ec2')
             
+            # Get instance details and VPC
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            instance_data = response['Reservations'][0]['Instances'][0]
+            vpc_id = instance_data['VpcId']
+            
+            # Save original security groups for restoration
+            original_sgs = [
+                sg['GroupId'] for sg in instance_data['SecurityGroups']
+            ]
+            self._original_sgs[instance_id] = original_sgs
+            logger.info(
+                f"Saved original SGs for {instance_id}: {original_sgs}"
+            )
+            
             # Create a security group that blocks all traffic
             sg_name = f"killswitch-block-{instance_id}"
             
-            # Get instance's VPC
-            response = ec2.describe_instances(InstanceIds=[instance_id])
-            vpc_id = response['Reservations'][0]['Instances'][0]['VpcId']
-            
-            # Create blocking security group
-            sg_response = ec2.create_security_group(
-                GroupName=sg_name,
-                Description=f"KILLSWITCH block for {instance_id}",
-                VpcId=vpc_id
-            )
-            sg_id = sg_response['GroupId']
+            try:
+                # Try to create the blocking security group
+                sg_response = ec2.create_security_group(
+                    GroupName=sg_name,
+                    Description=f"KILLSWITCH block for {instance_id}",
+                    VpcId=vpc_id
+                )
+                sg_id = sg_response['GroupId']
+            except Exception as e:
+                # SG may already exist, find it
+                if 'InvalidGroup.Duplicate' in str(e):
+                    desc = ec2.describe_security_groups(
+                        GroupNames=[sg_name]
+                    )
+                    sg_id = desc['SecurityGroups'][0]['GroupId']
+                else:
+                    raise
             
             # Remove all egress rules (block all outbound)
-            ec2.revoke_security_group_egress(
-                GroupId=sg_id,
-                IpPermissions=[{
-                    'IpProtocol': '-1',
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
-                }]
-            )
+            try:
+                ec2.revoke_security_group_egress(
+                    GroupId=sg_id,
+                    IpPermissions=[{
+                        'IpProtocol': '-1',
+                        'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                    }]
+                )
+            except Exception:
+                pass  # Egress rules may already be revoked
             
-            # Apply to instance
+            # Replace ALL security groups with only the blocking SG
             ec2.modify_instance_attribute(
                 InstanceId=instance_id,
                 Groups=[sg_id]
+            )
+            logger.info(
+                f"Replaced SGs {original_sgs} with blocking SG {sg_id}"
             )
             
             return NetworkKillReport(
                 agent_id=instance_id,
                 result=NetworkKillResult.SUCCESS,
                 platform="cloud/aws",
-                rules_applied=[f"Applied blocking SG {sg_id}"]
+                rules_applied=[
+                    f"Replaced {original_sgs} with blocking SG {sg_id}"
+                ]
             )
             
         except ImportError:
@@ -665,7 +834,7 @@ class CloudFirewall:
             )
     
     def _block_gcp_instance(self, instance_id: str) -> NetworkKillReport:
-        """Block GCP instance network access"""
+        """Block GCP instance network access."""
         # GCP implementation would go here
         return NetworkKillReport(
             agent_id=instance_id,
@@ -673,6 +842,89 @@ class CloudFirewall:
             platform="cloud/gcp",
             error="GCP support not yet implemented"
         )
+    
+    def restore_instance(self, instance_id: str) -> NetworkKillReport:
+        """Restore network access for a cloud instance."""
+        if self.provider == "aws":
+            return self._restore_aws_instance(instance_id)
+        elif self.provider == "gcp":
+            return NetworkKillReport(
+                agent_id=instance_id,
+                result=NetworkKillResult.NOT_SUPPORTED,
+                platform="cloud/gcp",
+                error="GCP restore not yet implemented"
+            )
+        else:
+            return NetworkKillReport(
+                agent_id=instance_id,
+                result=NetworkKillResult.NOT_SUPPORTED,
+                platform=f"cloud/{self.provider}",
+                error=f"Provider {self.provider} not supported"
+            )
+    
+    def _restore_aws_instance(self, instance_id: str) -> NetworkKillReport:
+        """Restore AWS EC2 instance network access."""
+        try:
+            import boto3
+            
+            ec2 = boto3.client('ec2')
+            
+            # Check if we have original security groups saved
+            if instance_id not in self._original_sgs:
+                return NetworkKillReport(
+                    agent_id=instance_id,
+                    result=NetworkKillResult.FAILED,
+                    platform="cloud/aws",
+                    error="No original security groups saved for this instance"
+                )
+            
+            original_sgs = self._original_sgs[instance_id]
+            
+            # Restore original security groups
+            ec2.modify_instance_attribute(
+                InstanceId=instance_id,
+                Groups=original_sgs
+            )
+            logger.info(
+                f"Restored original SGs {original_sgs} for {instance_id}"
+            )
+            
+            # Clean up the blocking security group
+            sg_name = f"killswitch-block-{instance_id}"
+            try:
+                desc = ec2.describe_security_groups(GroupNames=[sg_name])
+                sg_id = desc['SecurityGroups'][0]['GroupId']
+                ec2.delete_security_group(GroupId=sg_id)
+                logger.info(f"Deleted blocking SG {sg_id}")
+            except Exception as e:
+                logger.warning(f"Could not delete blocking SG: {e}")
+            
+            # Remove from saved state
+            del self._original_sgs[instance_id]
+            
+            return NetworkKillReport(
+                agent_id=instance_id,
+                result=NetworkKillResult.SUCCESS,
+                platform="cloud/aws",
+                rules_applied=[
+                    f"Restored original SGs: {original_sgs}"
+                ]
+            )
+            
+        except ImportError:
+            return NetworkKillReport(
+                agent_id=instance_id,
+                result=NetworkKillResult.FAILED,
+                platform="cloud/aws",
+                error="boto3 not installed"
+            )
+        except Exception as e:
+            return NetworkKillReport(
+                agent_id=instance_id,
+                result=NetworkKillResult.FAILED,
+                platform="cloud/aws",
+                error=str(e)
+            )
 
 
 # =============================================================================
@@ -760,7 +1012,9 @@ class NetworkKillManager:
         reports.append(os_report)
         
         # Determine overall result
-        success_count = sum(1 for r in reports if r.result == NetworkKillResult.SUCCESS)
+        success_count = sum(
+            1 for r in reports if r.result == NetworkKillResult.SUCCESS
+        )
         
         if success_count == len(reports):
             result = NetworkKillResult.SUCCESS
@@ -773,7 +1027,9 @@ class NetworkKillManager:
             agent_id=agent_id,
             result=result,
             platform=self.platform,
-            rules_applied=[r for report in reports for r in report.rules_applied],
+            rules_applied=[
+                r for report in reports for r in report.rules_applied
+            ],
             error="; ".join(r.error for r in reports if r.error)
         )
         

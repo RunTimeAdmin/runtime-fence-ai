@@ -67,6 +67,22 @@ INTENT_RISK_LEVELS = {
     IntentCategory.UNKNOWN: 60,
 }
 
+# Minimum risk floors by intent category - ensures dangerous intents aren't under-scored
+INTENT_RISK_FLOORS = {
+    IntentCategory.BENIGN: 0,
+    IntentCategory.FILE_READ: 0,
+    IntentCategory.FILE_WRITE: 20,
+    IntentCategory.FILE_DELETE: 80,
+    IntentCategory.NETWORK_REQUEST: 0,
+    IntentCategory.DATA_EXFIL: 80,
+    IntentCategory.SHELL_EXEC: 70,
+    IntentCategory.PRIVILEGE_ESCALATION: 85,
+    IntentCategory.CODE_INJECTION: 85,
+    IntentCategory.CRYPTO_OPERATION: 30,
+    IntentCategory.SYSTEM_MODIFICATION: 70,
+    IntentCategory.UNKNOWN: 40,
+}
+
 
 @dataclass
 class IntentAnalysis:
@@ -595,6 +611,10 @@ class IntentAnalyzer:
         else:
             result = local_result
         
+        # Floor-bound risk score by intent category (B-7 fix)
+        intent_floor = INTENT_RISK_FLOORS.get(result.intent, 40)
+        result.risk_score = max(result.risk_score, intent_floor)
+
         # Determine if blocked
         result.blocked = (
             result.risk_score >= self.risk_threshold or

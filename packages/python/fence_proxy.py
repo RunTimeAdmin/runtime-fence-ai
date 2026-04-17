@@ -8,8 +8,9 @@ import os
 import sys
 import json
 import socket
-import threading
-import subprocess
+import select
+import urllib.request
+import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from typing import Dict, Set
@@ -188,9 +189,59 @@ class FenceProxy:
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    """HTTP handler for the proxy."""
+    """HTTP handler for the proxy with actual forwarding."""
     
     fence: FenceProxy = None
+    
+    def do_CONNECT(self):
+        """Handle HTTPS CONNECT tunneling for encrypted traffic."""
+        # Parse host:port from CONNECT request
+        try:
+            host, port = self.path.split(':')
+            port = int(port)
+        except ValueError:
+            self.send_error(400, f"Invalid CONNECT request: {self.path}")
+            return
+        
+        # Detect agent based on host
+        headers_dict = dict(self.headers)
+        agent = self.fence.detect_agent(f"https://{host}", headers_dict)
+        
+        # Check if host should be blocked
+        blocked, reason = self.fence.should_block(f"https://{host}")
+        
+        if blocked:
+            logger.warning(f"[BLOCKED] CONNECT {host}:{port} - {reason}")
+            self.fence.blocked_requests.append({
+                "method": "CONNECT",
+                "url": f"{host}:{port}",
+                "agent": agent,
+                "reason": reason
+            })
+            self.send_error(403, f"Blocked by Runtime Fence: {reason}")
+            return
+        
+        # Establish upstream connection
+        try:
+            upstream = socket.create_connection((host, port), timeout=10)
+        except socket.error as e:
+            err_msg = f"Bad Gateway: Unable to connect to {host}:{port} - {e}"
+            self.send_error(502, err_msg)
+            return
+        
+        # Send connection established response
+        self.send_response(200, 'Connection Established')
+        self.end_headers()
+        
+        logger.info(f"[ALLOWED] CONNECT {host}:{port} ({agent})")
+        self.fence.allowed_requests.append({
+            "method": "CONNECT",
+            "url": f"{host}:{port}",
+            "agent": agent
+        })
+        
+        # Bidirectional tunnel
+        self._tunnel(self.connection, upstream)
     
     def do_GET(self):
         self._handle_request("GET")
@@ -205,16 +256,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._handle_request("DELETE")
     
     def _handle_request(self, method: str):
+        """Handle HTTP request with actual forwarding."""
         # Read body if present
         content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length).decode() if content_length > 0 else ""
+        body = self.rfile.read(content_length) if content_length > 0 else None
+        body_str = body.decode('utf-8', errors='replace') if body else ""
         
         # Detect agent
         headers_dict = dict(self.headers)
         agent = self.fence.detect_agent(self.path, headers_dict)
         
         # Check if should block
-        blocked, reason = self.fence.should_block(self.path, body)
+        blocked, reason = self.fence.should_block(self.path, body_str)
         
         if blocked:
             logger.warning(f"[BLOCKED] {method} {self.path} - {reason}")
@@ -231,21 +284,85 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "error": "Blocked by Runtime Fence",
                 "reason": reason
             }).encode())
-        else:
-            logger.info(f"[ALLOWED] {method} {self.path} ({agent})")
-            self.fence.allowed_requests.append({
-                "method": method,
-                "url": self.path,
-                "agent": agent
-            })
-            # In real implementation, forward to actual destination
-            self.send_response(200)
+            return
+        
+        # Actually forward the request
+        logger.info(f"[ALLOWED] {method} {self.path} ({agent})")
+        self.fence.allowed_requests.append({
+            "method": method,
+            "url": self.path,
+            "agent": agent
+        })
+        
+        try:
+            # Build the request URL (assume http if not specified)
+            if not self.path.startswith('http'):
+                # Use the Host header to construct full URL
+                host = self.headers.get('Host', 'localhost')
+                url = f"http://{host}{self.path}"
+            else:
+                url = self.path
+            
+            # Create the forwarded request
+            req = urllib.request.Request(url, data=body, method=method)
+            
+            # Copy relevant headers (exclude hop-by-hop headers)
+            hop_by_hop = {
+                'connection', 'keep-alive', 'proxy-authenticate',
+                'proxy-authorization', 'te', 'trailers',
+                'transfer-encoding', 'upgrade', 'proxy-connection', 'host'
+            }
+            for key, val in self.headers.items():
+                if key.lower() not in hop_by_hop:
+                    req.add_header(key, val)
+            
+            # Forward the request with timeout
+            resp = urllib.request.urlopen(req, timeout=30)
+            
+            # Send response back to client
+            self.send_response(resp.status)
+            for key, val in resp.headers.items():
+                if key.lower() not in hop_by_hop:
+                    self.send_header(key, val)
+            self.end_headers()
+            self.wfile.write(resp.read())
+            
+        except urllib.error.HTTPError as e:
+            # Forward HTTP errors
+            self.send_response(e.code)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({
-                "status": "forwarded",
-                "agent_detected": agent
+                "error": f"Upstream error: {e.code} {e.reason}"
             }).encode())
+        except urllib.error.URLError as e:
+            self.send_error(502, f"Bad Gateway: {e.reason}")
+        except Exception as e:
+            self.send_error(502, f"Bad Gateway: {str(e)}")
+    
+    def _tunnel(self, client: socket.socket, upstream: socket.socket):
+        """Bidirectional data tunnel for CONNECT."""
+        sockets = [client, upstream]
+        try:
+            while True:
+                readable, _, errors = select.select(sockets, [], sockets, 30)
+                if errors:
+                    break
+                if not readable:
+                    continue
+                for sock in readable:
+                    try:
+                        data = sock.recv(8192)
+                        if not data:
+                            return
+                        if sock is client:
+                            upstream.sendall(data)
+                        else:
+                            client.sendall(data)
+                    except socket.error:
+                        return
+        finally:
+            upstream.close()
     
     def log_message(self, format, *args):
         pass  # Suppress default logging
@@ -283,11 +400,18 @@ def configure_system_proxy(enable: bool = True, port: int = 8888):
         )
         
         if enable:
-            winreg.SetValueEx(internet_settings, 'ProxyEnable', 0, winreg.REG_DWORD, 1)
-            winreg.SetValueEx(internet_settings, 'ProxyServer', 0, winreg.REG_SZ, f'127.0.0.1:{port}')
+            winreg.SetValueEx(
+                internet_settings, 'ProxyEnable', 0, winreg.REG_DWORD, 1
+            )
+            winreg.SetValueEx(
+                internet_settings, 'ProxyServer', 0, winreg.REG_SZ,
+                f'127.0.0.1:{port}'
+            )
             logger.info(f"System proxy enabled: 127.0.0.1:{port}")
         else:
-            winreg.SetValueEx(internet_settings, 'ProxyEnable', 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(
+                internet_settings, 'ProxyEnable', 0, winreg.REG_DWORD, 0
+            )
             logger.info("System proxy disabled")
         
         winreg.CloseKey(internet_settings)

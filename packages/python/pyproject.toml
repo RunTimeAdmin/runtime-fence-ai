@@ -61,9 +61,9 @@ all = [
 
 [project.urls]
 Homepage = "https://runtimefence.com"
-Documentation = "https://github.com/Protocol14019/ai-agent-killswitch/wiki"
-Repository = "https://github.com/Protocol14019/ai-agent-killswitch"
-Issues = "https://github.com/Protocol14019/ai-agent-killswitch/issues"
+Documentation = "https://github.com/RunTimeAdmin/runtime-fence-ai/wiki"
+Repository = "https://github.com/RunTimeAdmin/runtime-fence-ai"
+Issues = "https://github.com/RunTimeAdmin/runtime-fence-ai/issues"
 
 [project.scripts]
 fence = "cli:main"

@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Union
 from runtime_fence import RuntimeFence, FenceConfig, RiskLevel
 import logging
 
+try:
+    from pydantic import PrivateAttr
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -77,19 +83,19 @@ class FencedTool(BaseTool):
     name: str
     description: str
     func: callable
-    fence: RuntimeFence
+    # Validation is performed via the callback handler, not the tool wrapper,
+    # to avoid double-validation. The tool wrapper delegates to the callback.
+    _fence: RuntimeFence = PrivateAttr()
+    
+    def __init__(self, fence: RuntimeFence, **kwargs):
+        super().__init__(**kwargs)
+        self._fence = fence
     
     def _run(self, query: str) -> str:
         """Execute the tool through the fence."""
-        # Validate action
-        result = self.fence.validate(
-            action=self.name,
-            target=query[:100],
-            context={"query": query}
-        )
-        
-        if not result.allowed:
-            return f"[BLOCKED by Runtime Fence] {', '.join(result.reasons)}"
+        # Validation is performed via the callback handler, not here,
+        # to avoid double-validation when using FencedLangChainAgent.
+        # The callback handler validates before tool execution.
         
         # Execute original function
         try:
@@ -121,10 +127,10 @@ def wrap_tools_with_fence(tools: List[BaseTool], fence: RuntimeFence) -> List[Fe
     fenced_tools = []
     for tool in tools:
         fenced_tool = FencedTool(
+            fence=fence,
             name=tool.name,
             description=tool.description,
-            func=tool.func if hasattr(tool, 'func') else tool._run,
-            fence=fence
+            func=tool.func if hasattr(tool, 'func') else tool._run
         )
         fenced_tools.append(fenced_tool)
     
@@ -303,4 +309,4 @@ if __name__ == "__main__":
     """)
     
     print("\nFor full working examples, see:")
-    print("https://github.com/RunTimeAdmin/ai-agent-killswitch/tree/main/examples")
+    print("https://github.com/RunTimeAdmin/runtime-fence-ai/tree/main/examples")

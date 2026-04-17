@@ -176,8 +176,10 @@ class RuntimeFence:
         else:
             risk_level = RiskLevel.LOW
 
-        # Decide if allowed
-        allowed = risk_score < self._risk_threshold_value()
+        # Decide if allowed - block HIGH and CRITICAL risk actions
+        allowed = risk_level not in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+        if allowed and risk_score >= self._risk_threshold_value():
+            allowed = False
 
         # Auto-kill on critical
         if risk_level == RiskLevel.CRITICAL and self.config.auto_kill_on_critical:
@@ -210,7 +212,7 @@ class RuntimeFence:
         return {
             RiskLevel.LOW: 25,
             RiskLevel.MEDIUM: 50,
-            RiskLevel.HIGH: 75,
+            RiskLevel.HIGH: 70,  # was 75, fixing threshold gap
             RiskLevel.CRITICAL: 90
         }[self.config.risk_threshold]
 

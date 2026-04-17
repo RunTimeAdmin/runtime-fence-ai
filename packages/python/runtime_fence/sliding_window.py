@@ -106,11 +106,12 @@ class SlidingWindow:
         while self.events and self.events[0].timestamp < cutoff:
             old = self.events.popleft()
             self._total -= old.value
+            self._total = max(0, self._total)  # B-8 fix: prevent negative total
 
     def get_total(self, current_time: float = None) -> float:
         ts = current_time or time.time()
         self._prune(ts)
-        return self._total
+        return max(0, self._total)  # B-8 fix: defense-in-depth floor
 
     def get_rate(self, current_time: float = None) -> float:
         total = self.get_total(current_time)
