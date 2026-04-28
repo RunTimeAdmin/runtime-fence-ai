@@ -1,4 +1,4 @@
-﻿# Runtime Fence .gitignore
+# $KILLSWITCH .gitignore
 # Security-focused configuration
 
 # ================================
@@ -112,7 +112,6 @@ htmlcov/
 .Trashes
 Thumbs.db
 ehthumbs.db
-desktop.ini
 Desktop.ini
 
 # ================================
@@ -152,6 +151,11 @@ secret-scan*
 # EXPO
 # ================================
 .expo/
+
+# ================================
+# MARKETING (internal only)
+# ================================
+marketing/
 
 # ================================
 # MISC
