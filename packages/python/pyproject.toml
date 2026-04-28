@@ -64,8 +64,9 @@ distributed = [
 policy = [
     "PyYAML>=6.0"
 ]
+llm-judge = ["anthropic>=0.20.0", "openai>=1.0.0"]
 all = [
-    "runtime-fence[dev,alerts,embeddings,spiffe,distributed,policy]"
+    "runtime-fence[dev,alerts,embeddings,spiffe,distributed,policy,llm-judge]"
 ]
 
 [project.urls]

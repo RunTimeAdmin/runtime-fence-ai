@@ -116,6 +116,39 @@ except ImportError:
     except ImportError:
         PROMPT_GUARD_AVAILABLE = False
 
+# LLM-as-Judge threat classification
+try:
+    from .llm_judge import LLMJudge
+    LLM_JUDGE_AVAILABLE = True
+except ImportError:
+    try:
+        from llm_judge import LLMJudge
+        LLM_JUDGE_AVAILABLE = True
+    except ImportError:
+        LLM_JUDGE_AVAILABLE = False
+
+# Action simulation sandbox
+try:
+    from .action_sandbox import ActionSandbox
+    SANDBOX_AVAILABLE = True
+except ImportError:
+    try:
+        from action_sandbox import ActionSandbox
+        SANDBOX_AVAILABLE = True
+    except ImportError:
+        SANDBOX_AVAILABLE = False
+
+# Preset security rule packs
+try:
+    from .rule_packs import get_preset as _get_preset
+    PRESETS_AVAILABLE = True
+except ImportError:
+    try:
+        from rule_packs import get_preset as _get_preset
+        PRESETS_AVAILABLE = True
+    except ImportError:
+        PRESETS_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("runtime_fence")
 
@@ -261,17 +294,28 @@ class FenceConfig:
     enable_sliding_window: bool = True
     # Prompt injection detection
     enable_prompt_guard: bool = True
+    # LLM-as-Judge escalation (off by default, requires API key)
+    enable_llm_judge: bool = False
+    llm_provider: str = "auto"     # "anthropic", "openai", or "auto"
+    llm_model: str = ""            # Model override (empty = default)
     # SPIFFE/SPIRE identity configuration
     spiffe_enabled: bool = False
     spiffe_workload_api: str = ""
     spiffe_trust_domain: str = "runtime-fence.local"
     # Policy-as-code YAML path
     policy_path: str = ""
+    # Preset security rule pack name
+    preset: str = ""
     # Time-bound access controls (direct config, no YAML needed)
     active_hours: list = None  # [start_hour, end_hour]
     active_days: list = None   # ["mon", "tue", ...]
     timezone: str = "UTC"
     cooldown_seconds: float = 0.0
+    # Action simulation sandbox config
+    enable_sandbox: bool = True
+    allowed_domains: list = None
+    blocked_domains: list = None
+    max_data_bytes: int = 10_000_000
 
 
 @dataclass
@@ -297,6 +341,7 @@ class RuntimeFence:
         self.killed = False
         self.action_log: list[ActionResult] = []
         self.total_spent = 0.0
+        self._policy = None
         logger.info(f"Runtime Fence initialized for agent: {config.agent_id}")
         
         # Initialize fail-mode handler if available
@@ -369,6 +414,31 @@ class RuntimeFence:
                     f"({len(custom_patterns)} custom patterns)"
                 )
 
+        # LLM-as-Judge escalation
+        self._llm_judge = None
+        if LLM_JUDGE_AVAILABLE and self.config.enable_llm_judge:
+            self._llm_judge = LLMJudge(
+                provider=self.config.llm_provider,
+                model=self.config.llm_model or None,
+            )
+            if self._llm_judge.is_available:
+                logger.info("LLM Judge enabled")
+            else:
+                logger.debug(
+                    "LLM Judge configured but no API key available"
+                )
+                self._llm_judge = None
+
+        # Action simulation sandbox
+        self._sandbox = None
+        if SANDBOX_AVAILABLE and self.config.enable_sandbox:
+            self._sandbox = ActionSandbox(
+                allowed_domains=self.config.allowed_domains,
+                blocked_domains=self.config.blocked_domains,
+                max_data_bytes=self.config.max_data_bytes,
+            )
+            logger.info("Action simulation sandbox enabled")
+
         # Initialize SPIFFE identity manager if enabled
         self._spiffe = None
         if self.config.spiffe_enabled:
@@ -404,28 +474,36 @@ class RuntimeFence:
             except ImportError:
                 pass
 
-        # Load YAML policy if available
-        self._policy = None
+        # Load preset if specified (YAML policy can override preset values)
+        if PRESETS_AVAILABLE and self.config.preset:
+            preset_policy = _get_preset(self.config.preset)
+            if preset_policy:
+                self._policy = preset_policy
+                logger.info(f"Loaded preset: {self.config.preset}")
+
+        # Load YAML policy if available (overrides preset)
         if POLICY_AVAILABLE:
-            self._policy = load_policy(
+            yaml_policy = load_policy(
                 self.config.policy_path or None
             )
-            # Apply policy to config where applicable
-            if self._policy:
-                p = self._policy
-                if p.blocked_actions and not self.config.blocked_actions:
-                    self.config.blocked_actions = p.blocked_actions
-                # Module toggles from policy
-                if hasattr(self.config, 'enable_behavioral'):
-                    self.config.enable_behavioral = p.enable_behavioral
-                if hasattr(self.config, 'enable_intent_analysis'):
-                    self.config.enable_intent_analysis = (
-                        p.enable_intent_analysis
-                    )
-                if hasattr(self.config, 'enable_sliding_window'):
-                    self.config.enable_sliding_window = (
-                        p.enable_sliding_window
-                    )
+            if yaml_policy:
+                self._policy = yaml_policy
+
+        # Apply policy to config where applicable
+        if self._policy:
+            p = self._policy
+            if p.blocked_actions and not self.config.blocked_actions:
+                self.config.blocked_actions = p.blocked_actions
+            if hasattr(self.config, 'enable_behavioral'):
+                self.config.enable_behavioral = p.enable_behavioral
+            if hasattr(self.config, 'enable_intent_analysis'):
+                self.config.enable_intent_analysis = (
+                    p.enable_intent_analysis
+                )
+            if hasattr(self.config, 'enable_sliding_window'):
+                self.config.enable_sliding_window = (
+                    p.enable_sliding_window
+                )
 
         # Time-bound access controls
         self._time_enforcer = None
@@ -594,6 +672,67 @@ class RuntimeFence:
                     risk_score = max(
                         risk_score, max_threat.risk_score
                     )
+
+        # LLM Judge escalation for ambiguous inputs
+        if self._llm_judge and prompt_threats:
+            max_threat = prompt_threats[0]
+            # Escalate medium-risk (50-79) to LLM for second opinion
+            if 50 <= max_threat.risk_score < 80:
+                context = (
+                    f"Action: {action}, "
+                    f"Target: {target}, "
+                    f"Agent: {agent_id}"
+                )
+                verdict = self._llm_judge.classify(scan_text, context)
+                if verdict and verdict.is_threat:
+                    log_msg = (
+                        f"LLM Judge confirmed threat: "
+                        f"{verdict.category} "
+                        f"(risk: {verdict.risk_score})"
+                    )
+                    logger.warning(log_msg)
+                    return ActionResult(
+                        allowed=False,
+                        action=action,
+                        target=target,
+                        risk_score=verdict.risk_score,
+                        risk_level=(
+                            RiskLevel.CRITICAL
+                            if verdict.risk_score >= 90
+                            else RiskLevel.HIGH
+                        ),
+                        reasons=[
+                            f"LLM analysis confirmed: "
+                            f"{verdict.category} — "
+                            f"{verdict.reasoning}"
+                        ],
+                        timestamp=time.time(),
+                    )
+                elif verdict and not verdict.is_threat:
+                    logger.info(
+                        f"LLM Judge cleared input "
+                        f"(confidence: {verdict.confidence})"
+                    )
+                    # LLM says safe — don't elevate risk from regex
+
+        # Action simulation (dry run)
+        if self._sandbox:
+            sim_result = self._sandbox.simulate(action, target, metadata)
+            if not sim_result.safe:
+                logger.warning(f"Sandbox blocked: {sim_result.blocked_reason}")
+                return ActionResult(
+                    allowed=False,
+                    action=action,
+                    target=target,
+                    risk_score=max(sim_result.risk_score, 90),
+                    risk_level=RiskLevel.CRITICAL,
+                    reasons=[f"Simulation blocked: {sim_result.blocked_reason}"],
+                    timestamp=time.time()
+                )
+            if sim_result.risk_score > 0:
+                risk_score = max(risk_score, sim_result.risk_score)
+                for warning in sim_result.warnings:
+                    logger.debug(f"Sandbox warning: {warning}")
 
         # Local checks (fast)
 

@@ -115,8 +115,21 @@ from .prompt_guard import (
     PromptThreat,
     DEFAULT_RULES,
 )
+from .llm_judge import (
+    LLMJudge,
+    ThreatVerdict,
+)
 from .time_controls import (
     TimeEnforcer,
+)
+from .action_sandbox import (
+    ActionSandbox,
+    SimulationResult,
+)
+from .rule_packs import (
+    get_preset,
+    list_presets,
+    PRESETS,
 )
 
 # SPIFFE/SPIRE integration (optional)
@@ -231,8 +244,18 @@ __all__ = [
     "PromptGuard",
     "PromptThreat",
     "DEFAULT_RULES",
+    # LLM Judge
+    "LLMJudge",
+    "ThreatVerdict",
     # Time Controls
     "TimeEnforcer",
+    # Action Sandbox
+    "ActionSandbox",
+    "SimulationResult",
+    # Preset Rule Packs
+    "get_preset",
+    "list_presets",
+    "PRESETS",
     # Version
     "__version__",
 ]
