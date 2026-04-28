@@ -83,6 +83,39 @@ except ImportError:
     except ImportError:
         SLIDING_WINDOW_AVAILABLE = False
 
+# Policy-as-code integration
+try:
+    from .policy_loader import load_policy
+    POLICY_AVAILABLE = True
+except ImportError:
+    try:
+        from policy_loader import load_policy
+        POLICY_AVAILABLE = True
+    except ImportError:
+        POLICY_AVAILABLE = False
+
+# Time-bound access controls
+try:
+    from .time_controls import TimeEnforcer
+    TIME_CONTROLS_AVAILABLE = True
+except ImportError:
+    try:
+        from time_controls import TimeEnforcer
+        TIME_CONTROLS_AVAILABLE = True
+    except ImportError:
+        TIME_CONTROLS_AVAILABLE = False
+
+# Prompt injection detection
+try:
+    from .prompt_guard import PromptGuard
+    PROMPT_GUARD_AVAILABLE = True
+except ImportError:
+    try:
+        from prompt_guard import PromptGuard
+        PROMPT_GUARD_AVAILABLE = True
+    except ImportError:
+        PROMPT_GUARD_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("runtime_fence")
 
@@ -226,10 +259,19 @@ class FenceConfig:
     # Off by default (requires LLM API key)
     enable_intent_analysis: bool = False
     enable_sliding_window: bool = True
+    # Prompt injection detection
+    enable_prompt_guard: bool = True
     # SPIFFE/SPIRE identity configuration
     spiffe_enabled: bool = False
     spiffe_workload_api: str = ""
     spiffe_trust_domain: str = "runtime-fence.local"
+    # Policy-as-code YAML path
+    policy_path: str = ""
+    # Time-bound access controls (direct config, no YAML needed)
+    active_hours: list = None  # [start_hour, end_hour]
+    active_days: list = None   # ["mon", "tue", ...]
+    timezone: str = "UTC"
+    cooldown_seconds: float = 0.0
 
 
 @dataclass
@@ -303,6 +345,30 @@ class RuntimeFence:
             except Exception as e:
                 logger.warning(f"Sliding window unavailable: {e}")
 
+        # Initialize prompt injection detection
+        self._prompt_guard = None
+        if PROMPT_GUARD_AVAILABLE:
+            should_enable = self.config.enable_prompt_guard
+            custom_patterns = []
+
+            if self._policy:
+                should_enable = (
+                    should_enable
+                    and self._policy.prompt_rules_enabled
+                )
+                custom_patterns = (
+                    self._policy.custom_prompt_patterns or []
+                )
+
+            if should_enable:
+                self._prompt_guard = PromptGuard(
+                    custom_patterns=custom_patterns
+                )
+                logger.info(
+                    f"Prompt injection guard enabled "
+                    f"({len(custom_patterns)} custom patterns)"
+                )
+
         # Initialize SPIFFE identity manager if enabled
         self._spiffe = None
         if self.config.spiffe_enabled:
@@ -337,6 +403,72 @@ class RuntimeFence:
                     )
             except ImportError:
                 pass
+
+        # Load YAML policy if available
+        self._policy = None
+        if POLICY_AVAILABLE:
+            self._policy = load_policy(
+                self.config.policy_path or None
+            )
+            # Apply policy to config where applicable
+            if self._policy:
+                p = self._policy
+                if p.blocked_actions and not self.config.blocked_actions:
+                    self.config.blocked_actions = p.blocked_actions
+                # Module toggles from policy
+                if hasattr(self.config, 'enable_behavioral'):
+                    self.config.enable_behavioral = p.enable_behavioral
+                if hasattr(self.config, 'enable_intent_analysis'):
+                    self.config.enable_intent_analysis = (
+                        p.enable_intent_analysis
+                    )
+                if hasattr(self.config, 'enable_sliding_window'):
+                    self.config.enable_sliding_window = (
+                        p.enable_sliding_window
+                    )
+
+        # Time-bound access controls
+        self._time_enforcer = None
+        self._agent_time_enforcers: dict = {}  # agent_id -> TimeEnforcer
+
+        if TIME_CONTROLS_AVAILABLE and self._policy:
+            # Global time controls from YAML policy
+            if self._policy.time_controls:
+                self._time_enforcer = TimeEnforcer.from_policy(
+                    self._policy.time_controls
+                )
+                if self._time_enforcer:
+                    logger.info("Global time controls enabled")
+
+            # Per-agent time controls from YAML policy
+            for agent_id, agent_policy in self._policy.agents.items():
+                if agent_policy.time_controls:
+                    enforcer = TimeEnforcer.from_policy(
+                        agent_policy.time_controls
+                    )
+                    if enforcer:
+                        self._agent_time_enforcers[agent_id] = enforcer
+                        logger.info(
+                            f"Time controls enabled for"
+                            f" agent: {agent_id}"
+                        )
+
+        # Fallback: direct FenceConfig time controls (no YAML)
+        if TIME_CONTROLS_AVAILABLE and not self._time_enforcer:
+            if (
+                self.config.active_hours
+                or self.config.active_days
+                or self.config.cooldown_seconds > 0
+            ):
+                self._time_enforcer = TimeEnforcer(
+                    active_hours=self.config.active_hours,
+                    active_days=self.config.active_days,
+                    tz=self.config.timezone,
+                    cooldown_seconds=self.config.cooldown_seconds,
+                )
+                logger.info(
+                    "Time controls enabled from FenceConfig"
+                )
 
         # Initialize rate limiter
         self._rate_limiter = _RateLimiter(max_per_second=100)
@@ -396,9 +528,74 @@ class RuntimeFence:
                 timestamp=time.time()
             )
 
-        # Local checks first (fast)
+        # Time-bound access check
+        agent_id_tc = (metadata or {}).get(
+            "agent_id", self.config.agent_id
+        )
+        time_enforcer = self._agent_time_enforcers.get(
+            agent_id_tc, self._time_enforcer
+        )
+        if time_enforcer:
+            allowed_time, reason = time_enforcer.check_allowed(
+                agent_id_tc
+            )
+            if not allowed_time:
+                logger.warning(f"Time control blocked: {reason}")
+                return ActionResult(
+                    allowed=False,
+                    action=action,
+                    target=target,
+                    risk_score=100,
+                    risk_level=RiskLevel.CRITICAL,
+                    reasons=[
+                        f"Time restriction: {reason}"
+                    ],
+                    timestamp=time.time()
+                )
+
+        # Initialize risk score before prompt scan
         reasons = []
         risk_score = 0
+
+        # Prompt injection scan
+        if self._prompt_guard:
+            scan_text = f"{action} {target}"
+            if metadata and isinstance(metadata, dict):
+                if "code" in metadata:
+                    scan_text += f" {metadata['code']}"
+                if "prompt" in metadata:
+                    scan_text += f" {metadata['prompt']}"
+                if "input" in metadata:
+                    scan_text += f" {metadata['input']}"
+
+            prompt_threats = self._prompt_guard.scan(scan_text)
+            if prompt_threats:
+                max_threat = prompt_threats[0]
+                if max_threat.risk_score >= 80:
+                    return ActionResult(
+                        allowed=False,
+                        action=action,
+                        target=target,
+                        risk_score=max_threat.risk_score,
+                        risk_level=(
+                            RiskLevel.CRITICAL
+                            if max_threat.risk_score >= 90
+                            else RiskLevel.HIGH
+                        ),
+                        reasons=[
+                            f"Prompt injection detected: "
+                            f"{max_threat.category}/"
+                            f"{max_threat.pattern_name}"
+                        ],
+                        timestamp=time.time(),
+                    )
+                else:
+                    # Below block threshold but elevate risk
+                    risk_score = max(
+                        risk_score, max_threat.risk_score
+                    )
+
+        # Local checks (fast)
 
         # Check blocked actions
         if action in self.config.blocked_actions:
@@ -409,6 +606,52 @@ class RuntimeFence:
         if any(blocked in target for blocked in self.config.blocked_targets):
             reasons.append(f"Target '{target}' is blocked")
             risk_score += 50
+
+        # Check policy-based target blocking
+        if self._policy:
+            import re
+            agent_id_meta = (metadata or {}).get("agent_id", "default")
+            agent_policy = self._policy.agents.get(agent_id_meta)
+
+            # Check global blocked targets
+            for pattern in self._policy.blocked_targets:
+                if re.search(pattern, target):
+                    reasons.append(f"Target blocked by policy: {pattern}")
+            risk_score += 50
+
+            # Check agent-specific overrides
+            if agent_policy:
+                # Allowed actions whitelist
+                if (
+                    agent_policy.allowed_actions
+                    and action not in agent_policy.allowed_actions
+                ):
+                    reasons.append(
+                        f"Action not in allowlist for "
+                        f"agent {agent_id_meta}"
+                    )
+                    risk_score += 90
+
+                # Agent blocked actions
+                if (
+                    agent_policy.blocked_actions
+                    and action in agent_policy.blocked_actions
+                ):
+                    reasons.append(
+                        f"Action blocked for agent "
+                        f"{agent_id_meta} by policy"
+                    )
+                    risk_score += 50
+
+                # Agent blocked targets
+                if agent_policy.blocked_targets:
+                    for pattern in agent_policy.blocked_targets:
+                        if re.search(pattern, target):
+                            reasons.append(
+                                f"Target blocked for agent "
+                                f"{agent_id_meta}: {pattern}"
+                            )
+                            risk_score += 50
 
         # Check spending limit
         if amount > 0:

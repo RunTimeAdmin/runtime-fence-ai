@@ -1,0 +1,91 @@
+# Runtime Fence Security Policy
+# Copy to fence_policy.yaml and customize for your deployment
+version: "1.0"
+
+# Global risk threshold (0-100, actions above this are blocked)
+default_risk_threshold: 70
+
+# Actions blocked for ALL agents
+blocked_actions:
+  - mass_data_export
+  - credential_dump
+  - network_scan
+  - code_execution
+  - system_command
+
+# Targets blocked for ALL agents (regex patterns)
+blocked_targets:
+  - "/etc/shadow"
+  - "/etc/passwd"
+  - "*.pem"
+  - "*.key"
+  - "s3://.*"
+
+# Module configuration
+modules:
+  behavioral: true
+  intent_analysis: false    # Requires LLM API key
+  sliding_window: true
+  prompt_guard: true
+
+# Global spending limits
+spending:
+  max_per_action: 100.00
+  max_daily: 1000.00
+  max_weekly: 5000.00
+  currency: USD
+
+# Time-bound access controls
+time_controls:
+  active_hours: [9, 17]     # 9am - 5pm
+  active_days: [mon, tue, wed, thu, fri]
+  timezone: America/New_York
+  cooldown_seconds: 1.0
+
+# Prompt injection guard
+prompt_guard:
+  enabled: true
+  custom_patterns:
+    - "ignore previous instructions"
+    - "you are now"
+    - "act as.*unrestricted"
+
+# Per-agent policy overrides
+agents:
+  data-analyst:
+    allowed_actions:
+      - read_file
+      - api_call
+      - write_file
+    blocked_targets:
+      - "/etc/*"
+      - "*.exe"
+    max_risk_score: 60
+    spending:
+      max_per_action: 50.00
+      max_daily: 500.00
+
+  trading-bot:
+    blocked_actions:
+      - file_delete
+      - system_command
+    time_controls:
+      active_hours: [8, 22]
+      active_days: [mon, tue, wed, thu, fri]
+      cooldown_seconds: 0.5
+    spending:
+      max_per_action: 1000.00
+      max_daily: 10000.00
+      max_weekly: 50000.00
+
+  coding-assistant:
+    allowed_actions:
+      - read_file
+      - write_file
+      - api_call
+    blocked_targets:
+      - "/etc/*"
+      - "*.env"
+      - "*.key"
+      - "*.pem"
+    max_risk_score: 50

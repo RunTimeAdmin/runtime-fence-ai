@@ -103,6 +103,21 @@ from .governance_separation import (
     VoteProvider,
     MockVoteProvider,
 )
+from .policy_loader import (
+    SpendingPolicy,
+    TimePolicy,
+    AgentPolicy,
+    FencePolicy,
+    load_policy,
+)
+from .prompt_guard import (
+    PromptGuard,
+    PromptThreat,
+    DEFAULT_RULES,
+)
+from .time_controls import (
+    TimeEnforcer,
+)
 
 # SPIFFE/SPIRE integration (optional)
 try:
@@ -206,6 +221,18 @@ __all__ = [
     # SPIFFE/SPIRE
     "SpiffeIdentityManager",
     "SpiffeConfig",
+    # Policy-as-Code
+    "SpendingPolicy",
+    "TimePolicy",
+    "AgentPolicy",
+    "FencePolicy",
+    "load_policy",
+    # Prompt Guard
+    "PromptGuard",
+    "PromptThreat",
+    "DEFAULT_RULES",
+    # Time Controls
+    "TimeEnforcer",
     # Version
     "__version__",
 ]

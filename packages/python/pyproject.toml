@@ -61,8 +61,11 @@ spiffe = [
 distributed = [
     "websocket-client>=1.0.0"
 ]
+policy = [
+    "PyYAML>=6.0"
+]
 all = [
-    "runtime-fence[dev,alerts,embeddings,spiffe,distributed]"
+    "runtime-fence[dev,alerts,embeddings,spiffe,distributed,policy]"
 ]
 
 [project.urls]
