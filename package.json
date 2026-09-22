@@ -25,6 +25,9 @@
     "turbo": "^1.11.3",
     "typescript": "^5.3.3"
   },
+  "overrides": {
+    "proxy-addr": "2.0.8"
+  },
   "packageManager": "npm@10.2.0",
   "engines": {
     "node": ">=18.0.0"
